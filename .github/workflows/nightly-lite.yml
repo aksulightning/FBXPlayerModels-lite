@@ -18,7 +18,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - branch: main
+          - branch: clientside
             tag: nightly-lite-26.2
             release_name: nightly-lite Build 26.2
             artifact_name: all-the-models-26.2
@@ -29,7 +29,7 @@ jobs:
             minecraft_version: "26.2"
             mod_launcher: "fabric"
 
-          - branch: main
+          - branch: clientside
             tag: nightly-lite-1.21.1
             release_name: nightly-lite Build 1.21.1
             artifact_name: all-the-models-1.21.1
@@ -59,7 +59,7 @@ jobs:
 on:
   push:
     branches:
-      - main
+      - clientside
 
   workflow_dispatch:
 
@@ -74,7 +74,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - branch: main
+          - branch: clientside
             tag: nightly-26.2
             release_name: Nightly Build 26.2
             artifact_name: all-the-models-26.2
@@ -85,7 +85,7 @@ jobs:
             minecraft_version: "26.2"
             mod_launcher: "fabric"
 
-          - branch: main
+          - branch: clientside
             tag: nightly-1.21.1
             release_name: Nightly Build 1.21.1
             artifact_name: all-the-models-1.21.1
