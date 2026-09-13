@@ -27,7 +27,7 @@ jobs:
             artifact_name: all-the-models-26.2
             artifact_path: "fabric-26.2/build/libs"
             gradlew_build: "./gradlew :fabric-26.2:build"
-            release_file: "fbx-player-models-v2.0.0+26.2+mc26.2.jar"
+            release_file: "fbx-player-models-lite-v2.0.0+26.2+mc26.2.jar"
             java_version: "25"
             minecraft_version: "26.2"
             mod_launcher: "fabric"
@@ -38,7 +38,7 @@ jobs:
             artifact_name: all-the-models-1.21.1
             artifact_path: "fabric-1.21.1/build/libs"
             gradlew_build: "./gradlew :fabric-1.21.1:build"
-            release_file: "fbx-player-models-v2.0.0+1.21.1+mc1.21.1.jar"
+            release_file: "fbx-player-models-lite-v2.0.0+1.21.1+mc1.21.1.jar"
             java_version: "21"
             minecraft_version: "1.21.1"
             mod_launcher: "fabric"
@@ -52,12 +52,12 @@ jobs:
             release_file: "fbx-player-models-lite-v2.0.0+b1.7.3+mcb1.7.3.jar"
             java_version: "21"
             minecraft_version: "b1.7.3"
-            mod_launcher: "fabric"
+            mod_launcher: "babric"
 
     steps:
       - name: Get current date
         id: date_step
-        run: echo "date=$(date -u +'%y-%m-%d-%H-%m')" >> $GITHUB_OUTPUT
+        run: echo "date=$(date -u +'%y-%m-%d-%H-%M')" >> "$GITHUB_OUTPUT"
         
       - name: checkout repository
         uses: actions/checkout@v6
@@ -101,3 +101,23 @@ jobs:
           BRANCH_NAME: ${{ matrix.branch }}
           BUILD_PATH: ${{ matrix.artifact_path }}
         run: bash .github/scripts/publish-nightly.sh
+
+      - name: prepare Modrinth artifact
+        env:
+          BUILD_PATH: ${{ matrix.artifact_path }}
+          RELEASE_FILE: ${{ matrix.release_file }}
+          MINECRAFT_VERSION: ${{ matrix.minecraft_version }}
+          BUILD_DATE: ${{ steps.date_step.outputs.date }}
+        run: cp -- "$BUILD_PATH/$RELEASE_FILE" "$BUILD_PATH/fbx-player-models-lite-nightly-$MINECRAFT_VERSION-$BUILD_DATE.jar"
+
+      - name: create modrinth release
+        uses: cloudnode-pro/modrinth-publish@v2
+        with:
+          token: ${{ secrets.MODRINTH_TOKEN }}
+          project: ${{ vars.MODRINTH_ID }}
+          channel: "alpha"
+          changelog: "Automatic nightly build from [GitHub repo](https://github.com/aksulightning/FBXPlayerModels-lite)."
+          version: ${{ matrix.branch }}-nightly-${{ steps.date_step.outputs.date }}
+          loaders: ${{ matrix.mod_launcher }}
+          game-versions: ${{ matrix.minecraft_version }}
+          files: ${{ matrix.artifact_path }}/fbx-player-models-lite-nightly-${{ matrix.minecraft_version }}-${{ steps.date_step.outputs.date }}.jar
