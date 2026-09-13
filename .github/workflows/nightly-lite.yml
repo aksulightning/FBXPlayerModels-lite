@@ -13,6 +13,9 @@ permissions:
 jobs:
   nightly:
     runs-on: ubuntu-24.04
+    concurrency:
+      group: ${{ github.workflow }}-${{ matrix.tag }}
+      cancel-in-progress: false
 
     strategy:
       fail-fast: false
@@ -90,38 +93,11 @@ jobs:
           name: ${{ matrix.artifact_name }}
           path: ${{ matrix.artifact_path }}
 
-      - name: prepare release tag
-        env:
-          TAG_NAME: ${{ matrix.tag }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git tag -f "$TAG_NAME"
-          git push --force origin "refs/tags/$TAG_NAME"
-
-          echo "COMMIT_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
-
-      - name: delete old release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG_NAME: ${{ matrix.tag }}
-        run: |
-          gh release delete "$TAG_NAME" --yes || true
-
-      - name: create release
+      - name: publish nightly release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ matrix.tag }}
           RELEASE_NAME: ${{ matrix.release_name }}
           BRANCH_NAME: ${{ matrix.branch }}
           BUILD_PATH: ${{ matrix.artifact_path }}
-        run: |
-          gh release create "$TAG_NAME" $BUILD_PATH/* \
-            --title "$RELEASE_NAME" \
-            --notes "Automatic nightly build.
-
-          Branch: $BRANCH_NAME
-          Commit: $COMMIT_SHA" \
-            --prerelease \
-            --verify-tag
+        run: bash .github/scripts/publish-nightly.sh
