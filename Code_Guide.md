@@ -78,6 +78,14 @@ The prescribed validation command compiles shared code and both modern targets. 
 
 Import validation on 2026-09-13: the prescribed four-task command succeeded with the Gradle wrapper launched using Java 25. Shared sources compiled with the installed Java 17 toolchain; both modern client compilation tasks passed, and both modern main compilation tasks have no Java sources. An initial Java 21 run compiled shared code and 1.21.1 but could not compile 26.2's `--release 25`. The successful retry used a checksum-verified temporary JDK at `/tmp/fbx-beta-import-jdk25/jdk-25.0.4.1` via `JAVA_HOME`; this path is specific to this session and is not checked into project configuration.
 
+## Nightly builds
+
+`.github/workflows/nightly-lite.yml` builds all three targets in separate matrix jobs on pushes to `clientside` or manual dispatch. The Beta job runs `./gradlew :fabric-b1.7.3:remapJar`, captures `fabric-b1.7.3/build/libs`, and uses the existing prerelease publication steps with tag `nightly-b1.7.3` and title **Nightly Build Beta 1.7.3**. Its production filename is `fbx-player-models-lite-v2.0.0+b1.7.3+mcb1.7.3.jar`.
+
+Each job explicitly installs a Java 17 compiler through `actions/setup-java@v5`, then selects the matrix JDK as the default Gradle runtime: Java 21 for Beta/1.21.1 and Java 25 for 26.2. The build passes the Java 17 setup step's `path` output through `org.gradle.java.installations.paths` so shared and Beta compiler toolchains can find it without relying on preinstalled runner JDKs. This follows the action's [documented multiple-JDK setup and path output](https://github.com/actions/setup-java/blob/v5/docs/advanced-usage.md#installing-jdk-without-setting-as-default). Beta remains Java 17 bytecode despite its Java 21 build runtime.
+
+Added the Beta nightly matrix entry and explicit compiler setup on 2026-09-13. Existing modern jobs, workflow triggers, permissions, and publication steps are retained. Validation: the four compile tasks required by `AGENTS.md` passed using Java 25; existing compilation outputs were up to date. The GitHub Actions workflow was not executed, no release was published, and the Beta artifact was not built locally.
+
 ## Project layout
 
 ```text

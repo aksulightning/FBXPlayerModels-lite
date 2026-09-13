@@ -40,6 +40,17 @@ jobs:
             minecraft_version: "1.21.1"
             mod_launcher: "fabric"
 
+          - branch: clientside
+            tag: nightly-b1.7.3
+            release_name: Nightly Build Beta 1.7.3
+            artifact_name: all-the-models-b1.7.3
+            artifact_path: "fabric-b1.7.3/build/libs"
+            gradlew_build: "./gradlew :fabric-b1.7.3:remapJar"
+            release_file: "fbx-player-models-lite-v2.0.0+b1.7.3+mcb1.7.3.jar"
+            java_version: "21"
+            minecraft_version: "b1.7.3"
+            mod_launcher: "fabric"
+
     steps:
       - name: Get current date
         id: date_step
@@ -54,7 +65,14 @@ jobs:
       - name: validate gradle wrapper
         uses: gradle/actions/wrapper-validation@v5
 
-      - name: setup jdk
+      - name: setup Java 17 compiler
+        id: java17
+        uses: actions/setup-java@v5
+        with:
+          java-version: "17"
+          distribution: "microsoft"
+
+      - name: setup Gradle runtime jdk
         uses: actions/setup-java@v5
         with:
           java-version: ${{ matrix.java_version }}
@@ -64,7 +82,7 @@ jobs:
         run: chmod +x ./gradlew
 
       - name: build
-        run: ${{ matrix.gradlew_build }}
+        run: ${{ matrix.gradlew_build }} -Dorg.gradle.java.installations.paths="${{ steps.java17.outputs.path }}"
 
       - name: capture build artifacts
         uses: actions/upload-artifact@v6
@@ -107,4 +125,3 @@ jobs:
           Commit: $COMMIT_SHA" \
             --prerelease \
             --verify-tag
-
