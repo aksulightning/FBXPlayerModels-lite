@@ -19,6 +19,8 @@ FBX mobs, server model storage, multiplayer model synchronization, and server sk
 
 Both downloads are experimental Fabric builds.
 
+The source also includes a Beta 1.7.3 target (`fabric-b1.7.3`). It requires Fabric Loader `0.19.3` or newer, StationAPI `2.0.0-alpha.6.4` or newer, and Java 17 or newer. See [Code_Guide.md](Code_Guide.md) for build requirements and target differences.
+
 ## How to use a model
 
 1. Install the mod on your client only.
@@ -26,6 +28,8 @@ Both downloads are experimental Fabric builds.
 3. Choose an `.fbx` file.
 4. Open **Settings** if the arms, legs, head, or body need different rig bindings.
 5. Use **Auto Bind** first, then adjust individual body-part bindings if necessary.
+
+On Beta 1.7.3, press **O** during gameplay, run `/skin`, or use the title-screen preview to open the menu. The shortcut can be reassigned in Controls; Beta does not require Mod Menu.
 
 The selected file is copied into the local `.fbxplayermodels/skins/` cache. The selection and rig settings are stored in `.fbxplayermodels/.config`.
 

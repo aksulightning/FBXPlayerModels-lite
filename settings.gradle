@@ -4,6 +4,11 @@ pluginManagement {
 			name = 'Fabric'
 			url = 'https://maven.fabricmc.net/'
 		}
+		maven {
+			name = 'Babric'
+			url = 'https://maven.glass-launcher.net/babric'
+		}
+		maven { url = 'https://jitpack.io/' }
 		mavenCentral()
 		gradlePluginPortal()
 	}
@@ -27,4 +32,8 @@ if (includeAllFabricProjects || requestedFabricProjects.contains("fabric-1.21.1"
 
 if (includeAllFabricProjects || requestedFabricProjects.contains("fabric-26.2")) {
 	include("fabric-26.2")
+}
+
+if (includeAllFabricProjects || requestedFabricProjects.contains("fabric-b1.7.3")) {
+	include("fabric-b1.7.3")
 }

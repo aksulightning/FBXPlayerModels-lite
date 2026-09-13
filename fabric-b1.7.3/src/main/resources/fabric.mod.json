@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "id": "fbx-player-models",
+  "version": "${version}",
+  "name": "FBX Player Models Lite",
+  "description": "Use a local FBX model for your own player on this client only.",
+  "authors": [
+    "1TheCrazy",
+    "Aksu Lightning"
+  ],
+  "contact": {
+    "sources": "https://github.com/aksulightning/FBXPlayerModels-lite",
+    "homepage": "https://github.com/aksulightning/FBXPlayerModels-lite"
+  },
+  "license": "MIT",
+  "icon": "assets/fbx-player-models/icon.png",
+  "environment": "client",
+  "entrypoints": {
+    "stationapi:event_bus_client": [
+      "me.onethecrazy.b173.ClientInitListener"
+    ]
+  },
+  "mixins": [
+    {
+      "config": "fbx-player-models.b173.client.mixins.json",
+      "environment": "client"
+    }
+  ],
+  "depends": {
+    "fabricloader": ">=0.19.3",
+    "minecraft": "1.0.0-beta.7.3",
+    "java": ">=17",
+    "stationapi": ">=2.0.0-alpha.6.4"
+  }
+}

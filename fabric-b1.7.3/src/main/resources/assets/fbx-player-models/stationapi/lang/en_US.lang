@@ -1,0 +1,10 @@
+key.fbxplayermodels.open_menu=Open FBX Player Models Menu
+gui.fbxplayermodels.select_skin=Choose a skin...
+gui.fbxplayermodels.mod_enabled=Enabled
+gui.fbxplayermodels.mod_disabled=Disabled
+gui.fbxplayermodels.first_person_self_model_enabled=First Person Model: On
+gui.fbxplayermodels.first_person_self_model_disabled=First Person Model: Off
+gui.fbxplayermodels.first_person_camera_x=First Person Camera X: %s
+gui.fbxplayermodels.first_person_camera_y=First Person Camera Y: %s
+gui.fbxplayermodels.first_person_camera_z=First Person Camera Z: %s
+gui.fbxplayermodels.reset=Reset Skin

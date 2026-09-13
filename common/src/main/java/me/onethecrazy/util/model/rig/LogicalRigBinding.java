@@ -30,7 +30,7 @@ public class LogicalRigBinding {
 
     public String firstName(LogicalBodyPart part) {
         List<String> names = namesFor(part);
-        return names.isEmpty() ? "" : names.getFirst();
+        return names.isEmpty() ? "" : names.get(0);
     }
 
     public boolean isEmpty() {
