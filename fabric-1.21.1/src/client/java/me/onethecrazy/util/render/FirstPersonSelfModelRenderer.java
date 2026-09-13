@@ -17,8 +17,6 @@ import net.minecraft.client.render.VertexConsumerProvider;
 import net.minecraft.client.render.WorldRenderer;
 import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.entity.EntityPose;
-import net.minecraft.util.Arm;
-import net.minecraft.util.Hand;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.RotationAxis;
@@ -65,7 +63,7 @@ public final class FirstPersonSelfModelRenderer {
 
         matrices.push();
         matrices.translate(playerPos.x - cameraPos.x, playerPos.y - cameraPos.y, playerPos.z - cameraPos.z);
-        matrices.multiply(RotationAxis.POSITIVE_Y.rotationDegrees(-context.camera().getYaw()));
+        matrices.multiply(RotationAxis.POSITIVE_Y.rotationDegrees(-MathHelper.lerpAngleDegrees(tickDelta, player.prevBodyYaw, player.bodyYaw)));
 
         MatrixStack.Entry entry = matrices.peek();
         Matrix4f matrix = entry.getPositionMatrix();
@@ -96,11 +94,8 @@ public final class FirstPersonSelfModelRenderer {
         if (cacheSkin.skinnedModel != null) {
             String animation = currentAnimation(player);
             float seconds = (player.age + tickDelta) / 20f;
-            boolean idle = "Idle".equals(animation);
-            CustomModelPose.HeadLookRotation headLookRotation = idle
-                    ? CustomModelPose.computeHeadLookRotation(player, tickDelta)
-                    : CustomModelPose.HeadLookRotation.NONE;
-            CustomModelPose.LimbPose limbPose = computeMinecraftLimbPose(player, tickDelta, animation);
+            CustomModelPose.HeadLookRotation headLookRotation = CustomModelPose.computeHeadLookRotation(player, tickDelta);
+            CustomModelPose.LimbPose limbPose = CustomModelPose.computeLimbPose(player, tickDelta, animation);
             vertices = cacheSkin.skinnedModel.renderWithHiddenHead(animation, seconds, headLookRotation, limbPose);
         }
 
@@ -131,77 +126,6 @@ public final class FirstPersonSelfModelRenderer {
             return "Sneak";
         }
         return isWalking(player) ? "Walk" : "Idle";
-    }
-
-    private static CustomModelPose.LimbPose computeMinecraftLimbPose(ClientPlayerEntity player, float tickDelta, String animation) {
-        if ("Sit".equals(animation)) {
-            return sittingLimbPose();
-        }
-        if (!"Walk".equals(animation) && !"Sneak".equals(animation)) {
-            return handActionPose(player, tickDelta);
-        }
-
-        boolean sneaking = "Sneak".equals(animation);
-        float limbProgress = player.limbAnimator.getPos(tickDelta);
-        float limbAmplitude = player.limbAnimator.getSpeed(tickDelta);
-        float armAmplitude = limbAmplitude;
-        float legAmplitude = 1.4f * limbAmplitude;
-        float sneakArmPitch = sneaking ? 0.4f : 0f;
-
-        return new CustomModelPose.LimbPose(
-                new CustomModelPose.BodyPartRotation(MathHelper.cos(limbProgress * 0.6662f + MathHelper.PI) * armAmplitude + sneakArmPitch, 0f, 0f),
-                new CustomModelPose.BodyPartRotation(MathHelper.cos(limbProgress * 0.6662f) * armAmplitude + sneakArmPitch, 0f, 0f),
-                new CustomModelPose.BodyPartRotation(MathHelper.cos(limbProgress * 0.6662f) * legAmplitude, 0.005f, 0.005f),
-                new CustomModelPose.BodyPartRotation(MathHelper.cos(limbProgress * 0.6662f + MathHelper.PI) * legAmplitude, -0.005f, -0.005f)
-        ).withArmAction(handActionPose(player, tickDelta));
-    }
-
-    private static CustomModelPose.LimbPose sittingLimbPose() {
-        return new CustomModelPose.LimbPose(
-                new CustomModelPose.BodyPartRotation(-0.62831855f, 0f, 0f),
-                new CustomModelPose.BodyPartRotation(-0.62831855f, 0f, 0f),
-                new CustomModelPose.BodyPartRotation(-1.5707964f, 0f, 0f),
-                new CustomModelPose.BodyPartRotation(-1.5707964f, 0f, 0f)
-        );
-    }
-
-    private static CustomModelPose.LimbPose handActionPose(ClientPlayerEntity player, float tickDelta) {
-        MinecraftClient client = MinecraftClient.getInstance();
-        boolean breakingBlock = client.interactionManager != null && client.interactionManager.isBreakingBlock();
-        if (breakingBlock) {
-            float phase = ((player.age + tickDelta) % 8f) / 8f;
-            Hand hand = player.handSwinging ? player.preferredHand : Hand.MAIN_HAND;
-            return singleArmPose(player, hand, breakingRotation(phase));
-        }
-
-        float swing = player.getHandSwingProgress(tickDelta);
-        if (swing <= 0f) {
-            return CustomModelPose.LimbPose.NONE;
-        }
-
-        return singleArmPose(player, player.preferredHand, placingRotation(swing));
-    }
-
-    private static CustomModelPose.LimbPose singleArmPose(ClientPlayerEntity player, Hand hand, CustomModelPose.BodyPartRotation rotation) {
-        boolean rightArm = isRightArm(player, hand);
-        return rightArm
-                ? CustomModelPose.LimbPose.NONE.withRightArm(rotation)
-                : CustomModelPose.LimbPose.NONE.withLeftArm(rotation);
-    }
-
-    private static boolean isRightArm(ClientPlayerEntity player, Hand hand) {
-        boolean mainArmRight = player.getMainArm() == Arm.RIGHT;
-        return hand == Hand.MAIN_HAND == mainArmRight;
-    }
-
-    private static CustomModelPose.BodyPartRotation breakingRotation(float phase) {
-        float chop = MathHelper.sin(phase * MathHelper.TAU);
-        return new CustomModelPose.BodyPartRotation(-1.15f - 0.55f * chop, 0.18f * chop, 0.12f * chop);
-    }
-
-    private static CustomModelPose.BodyPartRotation placingRotation(float swing) {
-        float ease = MathHelper.sin(MathHelper.sqrt(swing) * MathHelper.PI);
-        return new CustomModelPose.BodyPartRotation(-0.45f - 0.85f * ease, 0f, 0.18f * ease);
     }
 
 }

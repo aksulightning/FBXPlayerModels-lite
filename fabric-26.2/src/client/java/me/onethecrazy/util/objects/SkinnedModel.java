@@ -5,10 +5,11 @@ import me.onethecrazy.util.model.animation.CustomModelPose;
 import me.onethecrazy.util.model.rig.LogicalBodyPart;
 import me.onethecrazy.util.model.rig.LogicalRigBinding;
 import org.joml.Matrix4f;
+import org.joml.Matrix3f;
+import org.joml.Quaternionf;
 import org.joml.Vector3f;
 
 import java.util.ArrayList;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -25,6 +26,10 @@ public class SkinnedModel {
     public final Map<String, Animation> animations;
     private final boolean animationsEnabled;
     private final LogicalRigBinding logicalRigBinding;
+    private final Matrix4f rootNormalization;
+    private final Matrix4f headBindBasis;
+    private final Vector3f chestPosturePivot;
+    private final int chestBoneIndex;
     private final int headBoneIndex;
     private final int rightArmBoneIndex;
     private final int leftArmBoneIndex;
@@ -32,35 +37,52 @@ public class SkinnedModel {
     private final int leftLegBoneIndex;
 
     public SkinnedModel(List<Bone> bones, List<SkinnedVertex> vertices, Map<String, Animation> animations) {
-        this(bones, vertices, animations, LogicalRigBinding.autoBind(bones.stream().map(Bone::name).toList()), true);
+        this(bones, vertices, animations, LogicalRigBinding.autoBind(bones.stream().map(Bone::name).toList()), true, null);
     }
 
-    private SkinnedModel(List<Bone> bones, List<SkinnedVertex> vertices, Map<String, Animation> animations, LogicalRigBinding logicalRigBinding, boolean animationsEnabled) {
+    private SkinnedModel(List<Bone> bones, List<SkinnedVertex> vertices, Map<String, Animation> animations, LogicalRigBinding logicalRigBinding, boolean animationsEnabled, Matrix4f rootNormalization) {
         this.bones = bones;
         this.vertices = vertices;
         this.animations = animations;
         this.animationsEnabled = animationsEnabled;
+        this.rootNormalization = rootNormalization;
         this.logicalRigBinding = logicalRigBinding == null
                 ? LogicalRigBinding.autoBind(bones.stream().map(Bone::name).toList())
                 : logicalRigBinding;
-        this.headBoneIndex = resolveHeadBoneIndex();
+        this.headBoneIndex = resolveBodyPartBoneIndex(LogicalBodyPart.HEAD);
+        this.chestBoneIndex = resolveBodyPartBoneIndex(LogicalBodyPart.CHEST);
         this.rightArmBoneIndex = resolveBodyPartBoneIndex(LogicalBodyPart.RIGHT_ARM);
         this.leftArmBoneIndex = resolveBodyPartBoneIndex(LogicalBodyPart.LEFT_ARM);
         this.rightLegBoneIndex = resolveBodyPartBoneIndex(LogicalBodyPart.RIGHT_LEG);
         this.leftLegBoneIndex = resolveBodyPartBoneIndex(LogicalBodyPart.LEFT_LEG);
+        this.headBindBasis = headBoneIndex < 0 ? new Matrix4f()
+                : new Matrix4f(bones.get(headBoneIndex).inverseBind).invert().setTranslation(0f, 0f, 0f);
+        this.chestPosturePivot = inferMalformedChestPivot();
         warnOnceIfMissingHeadBone();
     }
 
     public SkinnedModel withAnimations(Map<String, Animation> animations) {
-        return new SkinnedModel(bones, vertices, animations, logicalRigBinding, animationsEnabled);
+        return new SkinnedModel(bones, vertices, animations, logicalRigBinding, animationsEnabled, rootNormalization);
     }
 
     public SkinnedModel withLogicalRigBinding(LogicalRigBinding logicalRigBinding) {
-        return new SkinnedModel(bones, vertices, animations, logicalRigBinding, animationsEnabled);
+        return new SkinnedModel(bones, vertices, animations, logicalRigBinding, animationsEnabled, rootNormalization);
     }
 
     public SkinnedModel withAnimationsEnabled(boolean animationsEnabled) {
-        return new SkinnedModel(bones, vertices, animations, logicalRigBinding, animationsEnabled);
+        return new SkinnedModel(bones, vertices, animations, logicalRigBinding, animationsEnabled, rootNormalization);
+    }
+
+    public boolean isNormalized() {
+        return rootNormalization != null;
+    }
+
+    public SkinnedModel withNormalizedGeometry(List<Bone> normalizedBones, List<SkinnedVertex> normalizedVertices, Matrix4f normalization) {
+        return new SkinnedModel(normalizedBones, normalizedVertices, animations, logicalRigBinding, animationsEnabled, new Matrix4f(normalization));
+    }
+
+    public SkinnedModel withVertices(List<SkinnedVertex> replacementVertices) {
+        return new SkinnedModel(bones, replacementVertices, animations, logicalRigBinding, animationsEnabled, rootNormalization);
     }
 
     public boolean hasAnimations() {
@@ -83,55 +105,39 @@ public class SkinnedModel {
     }
 
     public List<Vertex> render(String animationName, float seconds) {
-        return render(animationName, seconds, CustomModelPose.HeadLookRotation.NONE);
+        return render(animationName, seconds, CustomModelPose.HeadLookRotation.NONE, CustomModelPose.LimbPose.NONE, false, false);
     }
 
     public List<Vertex> render(String animationName, float seconds, CustomModelPose.HeadLookRotation headLookRotation) {
-        return render(animationName, seconds, headLookRotation, CustomModelPose.LimbPose.NONE);
+        return render(animationName, seconds, headLookRotation, CustomModelPose.LimbPose.NONE, false, false);
     }
 
     public List<Vertex> render(String animationName, float seconds, CustomModelPose.HeadLookRotation headLookRotation, CustomModelPose.LimbPose limbPose) {
-        return render(animationName, seconds, headLookRotation, limbPose, false, false);
-    }
-
-    public List<Vertex> renderWithForcedHeadLook(String animationName, float seconds, CustomModelPose.HeadLookRotation headLookRotation, CustomModelPose.LimbPose limbPose) {
         return render(animationName, seconds, headLookRotation, limbPose, false, true);
     }
 
     public List<Vertex> renderWithHiddenHead(String animationName, float seconds, CustomModelPose.HeadLookRotation headLookRotation, CustomModelPose.LimbPose limbPose) {
-        return render(animationName, seconds, headLookRotation, limbPose, true, false);
+        return render(animationName, seconds, headLookRotation, limbPose, true, true);
     }
 
-    private List<Vertex> render(String animationName, float seconds, CustomModelPose.HeadLookRotation headLookRotation, CustomModelPose.LimbPose limbPose, boolean hideHead, boolean forceHeadLook) {
+    private List<Vertex> render(String animationName, float seconds, CustomModelPose.HeadLookRotation headLookRotation, CustomModelPose.LimbPose limbPose, boolean hideHead, boolean liveLimbPose) {
         if (!animationsEnabled) {
             return staticVertices(hideHead);
         }
-
-        Animation animation = animations.get(animationName);
-        if (animation == null) {
-            if ("Idle".equals(animationName) || forceHeadLook) {
-                return renderPose(null, seconds, headLookRotation, true, limbPose, hideHead);
-            }
-            return staticVertices(hideHead);
-        }
-
-        boolean logicalRigDriven = animation.logicalRigDriven();
-        return renderPose(animation, seconds, headLookRotation, forceHeadLook || (logicalRigDriven && "Idle".equals(animationName)), logicalRigDriven ? limbPose : CustomModelPose.LimbPose.NONE, hideHead);
+        boolean sleeping = "Sleep".equals(animationName);
+        return renderPose(animations.get(animationName), seconds,
+                sleeping ? CustomModelPose.HeadLookRotation.NONE : headLookRotation,
+                sleeping ? CustomModelPose.LimbPose.NONE : limbPose, hideHead, liveLimbPose || sleeping);
     }
 
-    private List<Vertex> renderPose(Animation animation, float seconds, CustomModelPose.HeadLookRotation headLookRotation, boolean applyIdleHeadLook, CustomModelPose.LimbPose limbPose, boolean hideHead) {
+    private List<Vertex> renderPose(Animation animation, float seconds, CustomModelPose.HeadLookRotation headLookRotation, CustomModelPose.LimbPose limbPose, boolean hideHead, boolean liveLimbPose) {
         Matrix4f[] globals = new Matrix4f[bones.size()];
         Matrix4f[] skin = new Matrix4f[bones.size()];
+        Matrix4f localLook = headLookRotation.yawRadians() == 0f && headLookRotation.pitchRadians() == 0f
+                ? new Matrix4f()
+                : new Matrix4f(headBindBasis).invert().mul(headLookRotation.toMatrix()).mul(headBindBasis);
         for (int i = 0; i < bones.size(); i++) {
-            globalTransform(i, animation, seconds, limbPose, globals);
-        }
-
-        if (applyIdleHeadLook && headBoneIndex >= 0) {
-            applyHeadLookToSubtree(globals, headLookRotation);
-        }
-        applyWalkLimbPose(globals, limbPose);
-
-        for (int i = 0; i < bones.size(); i++) {
+            globalTransform(i, animation, seconds, limbPose, liveLimbPose, localLook, globals);
             skin[i] = new Matrix4f(globals[i]).mul(bones.get(i).inverseBind);
         }
 
@@ -139,62 +145,102 @@ public class SkinnedModel {
             logSkinningDebug(seconds, animation, skin);
             skinningDebugLogged = true;
         }
-
         return renderSkinnedVertices(skin, hideHead);
     }
 
-    private Matrix4f globalTransform(int boneIndex, Animation animation, float seconds, CustomModelPose.LimbPose limbPose, Matrix4f[] globals) {
+    private Matrix4f globalTransform(int boneIndex, Animation animation, float seconds, CustomModelPose.LimbPose limbPose, boolean liveLimbPose, Matrix4f localLook, Matrix4f[] globals) {
         if (globals[boneIndex] != null) {
             return globals[boneIndex];
         }
-
         Bone bone = bones.get(boneIndex);
-        Matrix4f local = animation == null || isOverriddenPartBone(boneIndex, limbPose)
-                ? new Matrix4f(bone.localBind)
-                : animation.localTransform(boneIndex, seconds, bone.localBind);
-        globals[boneIndex] = bone.parentIndex >= 0
-                ? new Matrix4f(globalTransform(bone.parentIndex, animation, seconds, limbPose, globals)).mul(local)
+        boolean generatedLimb = animation != null && animation.logicalRigDriven && isLimbBone(boneIndex);
+        Matrix4f local = new Matrix4f(bone.localBind);
+        if (animation != null && !generatedLimb) {
+            if (bone.parentIndex < 0 && rootNormalization != null && !animation.logicalRigDriven) {
+                // Absolute root keys are still in imported units; apply normalization exactly once.
+                Matrix4f importedBind = new Matrix4f(rootNormalization).invert().mul(local);
+                local = new Matrix4f(rootNormalization).mul(animation.localTransform(boneIndex, seconds, importedBind));
+            } else if (boneIndex == chestBoneIndex && animation.logicalRigDriven) {
+                Vector3f r = animation.rotationFor(boneIndex, seconds);
+                local.translate(chestPosturePivot)
+                        .rotateY((float) Math.toRadians(r.y))
+                        .rotateX((float) Math.toRadians(r.x))
+                        .rotateZ((float) Math.toRadians(r.z))
+                        .translate(-chestPosturePivot.x, -chestPosturePivot.y, -chestPosturePivot.z);
+            } else {
+                local = animation.localTransform(boneIndex, seconds, local);
+            }
+        }
+        if (boneIndex == headBoneIndex) {
+            // Gposed * inverse(B) * R * B preserves the joint and inherits parent posture.
+            local.mul(localLook);
+        }
+        Matrix4f global = bone.parentIndex >= 0
+                ? new Matrix4f(globalTransform(bone.parentIndex, animation, seconds, limbPose, liveLimbPose, localLook, globals)).mul(local)
                 : local;
-        return globals[boneIndex];
+
+        CustomModelPose.BodyPartRotation rotation = liveLimbPose ? limbRotation(boneIndex, limbPose) : CustomModelPose.BodyPartRotation.NONE;
+        if (generatedLimb && !liveLimbPose) {
+            Vector3f r = animation.rotationFor(boneIndex, seconds);
+            rotation = new CustomModelPose.BodyPartRotation((float) Math.toRadians(r.x), (float) Math.toRadians(r.y), (float) Math.toRadians(r.z));
+        }
+        if (!rotation.isNone()) {
+            Vector3f joint = global.getTranslation(new Vector3f());
+            global = rotation.globalPivotDelta(joint).mul(global);
+        }
+        // Children compose with the posed global, so every delta propagates in hierarchy order.
+        globals[boneIndex] = global;
+        return global;
     }
 
-    private boolean isOverriddenPartBone(int boneIndex, CustomModelPose.LimbPose limbPose) {
-        return boneIndex == headBoneIndex
-                || boneIndex == rightArmBoneIndex && !limbPose.rightArm().isNone()
-                || boneIndex == leftArmBoneIndex && !limbPose.leftArm().isNone()
-                || boneIndex == rightLegBoneIndex && !limbPose.rightLeg().isNone()
-                || boneIndex == leftLegBoneIndex && !limbPose.leftLeg().isNone();
+    private boolean isLimbBone(int index) {
+        return index == rightArmBoneIndex || index == leftArmBoneIndex || index == rightLegBoneIndex || index == leftLegBoneIndex;
     }
 
-    private void applyHeadLookToSubtree(Matrix4f[] globals, CustomModelPose.HeadLookRotation headLookRotation) {
-        Vector3f pivot = globals[headBoneIndex].getTranslation(new Vector3f());
-        Matrix4f delta = headLookRotation.globalPivotDelta(pivot);
-        for (int i = 0; i < bones.size(); i++) {
-            if (i == headBoneIndex || isDescendantOf(i, headBoneIndex)) {
-                globals[i] = new Matrix4f(delta).mul(globals[i]);
+    private CustomModelPose.BodyPartRotation limbRotation(int index, CustomModelPose.LimbPose pose) {
+        if (index == rightArmBoneIndex) return pose.rightArm();
+        if (index == leftArmBoneIndex) return pose.leftArm();
+        if (index == rightLegBoneIndex) return pose.rightLeg();
+        if (index == leftLegBoneIndex) return pose.leftLeg();
+        return CustomModelPose.BodyPartRotation.NONE;
+    }
+
+    private Vector3f inferMalformedChestPivot() {
+        Vector3f localPivot = new Vector3f();
+        if (chestBoneIndex < 0 || vertices.isEmpty()) {
+            return localPivot;
+        }
+        Vector3f modelMin = new Vector3f(Float.POSITIVE_INFINITY);
+        Vector3f modelMax = new Vector3f(Float.NEGATIVE_INFINITY);
+        Vector3f chestMin = new Vector3f(Float.POSITIVE_INFINITY);
+        Vector3f chestMax = new Vector3f(Float.NEGATIVE_INFINITY);
+        boolean weighted = false;
+        for (SkinnedVertex vertex : vertices) {
+            Vector3f p = new Vector3f(vertex.vertex.position.x, vertex.vertex.position.y, vertex.vertex.position.z);
+            modelMin.min(p);
+            modelMax.max(p);
+            for (int i = 0; i < vertex.boneIds.length; i++) {
+                if (vertex.boneIds[i] == chestBoneIndex && vertex.weights[i] > 0f) {
+                    chestMin.min(p);
+                    chestMax.max(p);
+                    weighted = true;
+                    break;
+                }
             }
         }
-    }
-
-    private void applyWalkLimbPose(Matrix4f[] globals, CustomModelPose.LimbPose limbPose) {
-        applyBodyPartRotation(globals, rightArmBoneIndex, limbPose.rightArm());
-        applyBodyPartRotation(globals, leftArmBoneIndex, limbPose.leftArm());
-        applyBodyPartRotation(globals, rightLegBoneIndex, limbPose.rightLeg());
-        applyBodyPartRotation(globals, leftLegBoneIndex, limbPose.leftLeg());
-    }
-
-    private void applyBodyPartRotation(Matrix4f[] globals, int boneIndex, CustomModelPose.BodyPartRotation rotation) {
-        if (boneIndex < 0 || rotation.isNone()) {
-            return;
+        if (!weighted) {
+            return localPivot;
         }
-
-        Vector3f pivot = globals[boneIndex].getTranslation(new Vector3f());
-        Matrix4f delta = rotation.globalPivotDelta(pivot);
-        for (int i = 0; i < bones.size(); i++) {
-            if (i == boneIndex || isDescendantOf(i, boneIndex)) {
-                globals[i] = new Matrix4f(delta).mul(globals[i]);
-            }
+        Vector3f authoredJoint = new Matrix4f(bones.get(chestBoneIndex).inverseBind).invert().getTranslation(new Vector3f());
+        float margin = Math.max(0.001f, modelMax.distance(modelMin)) * 2f;
+        boolean farOutside = authoredJoint.x < modelMin.x - margin || authoredJoint.x > modelMax.x + margin
+                || authoredJoint.y < modelMin.y - margin || authoredJoint.y > modelMax.y + margin
+                || authoredJoint.z < modelMin.z - margin || authoredJoint.z > modelMax.z + margin;
+        if (farOutside) {
+            Vector3f attachment = new Vector3f((chestMin.x + chestMax.x) * 0.5f, chestMin.y, (chestMin.z + chestMax.z) * 0.5f);
+            bones.get(chestBoneIndex).inverseBind.transformPosition(attachment, localPivot);
         }
+        return localPivot;
     }
 
     private boolean isDescendantOf(int boneIndex, int ancestorIndex) {
@@ -209,6 +255,10 @@ public class SkinnedModel {
     }
 
     private List<Vertex> renderSkinnedVertices(Matrix4f[] skin, boolean hideHead) {
+        Matrix3f[] normalSkin = new Matrix3f[skin.length];
+        for (int i = 0; i < skin.length; i++) {
+            normalSkin[i] = skin[i].normal(new Matrix3f());
+        }
         List<Vertex> out = new ArrayList<>(vertices.size());
         for (int vertexIndex = 0; vertexIndex < vertices.size(); vertexIndex++) {
             if (hideHead && isHeadTriangleVertex(vertexIndex)) {
@@ -230,7 +280,7 @@ public class SkinnedModel {
                 }
 
                 Vector3f tp = skin[boneId].transformPosition(new Vector3f(basePos)).mul(weight);
-                Vector3f tn = skin[boneId].transformDirection(new Vector3f(baseNormal)).mul(weight);
+                Vector3f tn = normalSkin[boneId].transform(new Vector3f(baseNormal)).mul(weight);
                 p.add(tp);
                 n.add(tn);
                 totalWeight += weight;
@@ -244,6 +294,9 @@ public class SkinnedModel {
                 n.div(totalWeight);
             }
 
+            if (n.lengthSquared() == 0f) {
+                n.set(baseNormal);
+            }
             if (n.lengthSquared() > 0f) {
                 n.normalize();
             }
@@ -290,90 +343,8 @@ public class SkinnedModel {
         return false;
     }
 
-    private int resolveHeadBoneIndex() {
-        int boundHead = resolveBoundHeadBoneIndex(false);
-        if (boundHead >= 0) {
-            return boundHead;
-        }
-
-        int namedHead = resolveNamedHeadBoneIndex();
-        if (namedHead >= 0) {
-            return namedHead;
-        }
-
-        int boundNeck = resolveBoundHeadBoneIndex(true);
-        if (boundNeck >= 0) {
-            return boundNeck;
-        }
-
-        return -1;
-    }
-
-    private int resolveBoundHeadBoneIndex(boolean allowNeck) {
-        for (String boundName : logicalRigBinding.namesFor(LogicalBodyPart.HEAD)) {
-            int index = findBoneIndex(boundName);
-            if (index >= 0 && (allowNeck || isHeadBoneName(bones.get(index).name()))) {
-                return index;
-            }
-        }
-        return -1;
-    }
-
-    private int resolveNamedHeadBoneIndex() {
-        Set<String> candidates = new LinkedHashSet<>(List.of(
-                "head",
-                "Head",
-                "HEAD",
-                "mixamorig:Head",
-                "Bip001 Head"
-        ));
-
-        for (String candidate : candidates) {
-            int index = findBoneIndex(candidate);
-            if (index >= 0) {
-                return index;
-            }
-        }
-
-        for (int i = 0; i < bones.size(); i++) {
-            if (isHeadBoneName(bones.get(i).name())) {
-                return i;
-            }
-        }
-
-        return -1;
-    }
-
     private int resolveBodyPartBoneIndex(LogicalBodyPart part) {
-        for (String boundName : logicalRigBinding.namesFor(part)) {
-            int index = findBoneIndex(boundName);
-            if (index >= 0) {
-                return index;
-            }
-        }
-
-        for (int i = 0; i < bones.size(); i++) {
-            if (LogicalRigBinding.suggestPart(bones.get(i).name()) == part) {
-                return i;
-            }
-        }
-
-        return -1;
-    }
-
-    private int findBoneIndex(String boneName) {
-        String normalized = LogicalRigBinding.normalize(boneName);
-        for (int i = 0; i < bones.size(); i++) {
-            if (LogicalRigBinding.normalize(bones.get(i).name()).equals(normalized)) {
-                return i;
-            }
-        }
-        return -1;
-    }
-
-    private boolean isHeadBoneName(String boneName) {
-        String normalized = LogicalRigBinding.normalize(boneName);
-        return normalized.equals("head") || normalized.endsWith("head");
+        return LogicalRigBinding.resolveBoneIndex(bones.stream().map(Bone::name).toList(), logicalRigBinding, part);
     }
 
     private void warnOnceIfMissingHeadBone() {
@@ -522,14 +493,13 @@ public class SkinnedModel {
             Vector3f t = sampleVec(translation, seconds, fallbackTranslation);
             Vector3f s = sampleVec(scale, seconds, fallbackScale);
 
+            Matrix4f result = new Matrix4f().translation(t);
             if (r == null) {
-                r = new Vector3f();
+                result.rotate(fallback.getUnnormalizedRotation(new Quaternionf()).normalize());
+            } else {
+                result.rotateXYZ((float) Math.toRadians(r.x), (float) Math.toRadians(r.y), (float) Math.toRadians(r.z));
             }
-
-            return new Matrix4f()
-                    .translation(t)
-                    .rotateXYZ((float) Math.toRadians(r.x), (float) Math.toRadians(r.y), (float) Math.toRadians(r.z))
-                    .scale(s);
+            return result.scale(s);
         }
 
         public boolean hasTranslationKeys() {

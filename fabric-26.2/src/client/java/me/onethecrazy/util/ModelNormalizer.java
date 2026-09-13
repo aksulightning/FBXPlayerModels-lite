@@ -7,6 +7,7 @@ import java.util.Optional;
 import me.onethecrazy.util.objects.Float2;
 import me.onethecrazy.util.objects.Float3;
 import me.onethecrazy.util.objects.SkinnedModel;
+import me.onethecrazy.util.objects.SkinnedVertex;
 import me.onethecrazy.util.objects.Vertex;
 import org.joml.Matrix4f;
 import org.joml.Vector3f;
@@ -23,6 +24,9 @@ public class ModelNormalizer {
         // Get Scale Factor
         float pixelsPerBlock = 1f;
         // Model should be 2 Block height
+        if (!Float.isFinite(heightPx) || heightPx <= 0f) {
+            return vertices;
+        }
         float scaleFactor = 2f * pixelsPerBlock / heightPx;  // = 32 / heightPx
 
         Matrix4f xf = new Matrix4f()
@@ -44,27 +48,40 @@ public class ModelNormalizer {
     }
 
     public static SkinnedModel normalize(SkinnedModel model){
+        if (model.isNormalized()) {
+            return model;
+        }
         List<Vertex> vertices = model.staticVertices();
         Float2 pxMinMax = getModelHeight(vertices);
 
         float minY = pxMinMax.v, maxY = pxMinMax.u;
         float heightPx = maxY - minY;
+        if (!Float.isFinite(heightPx) || heightPx <= 0f) {
+            return model;
+        }
         float scaleFactor = 2f / heightPx;
 
         Matrix4f xf = new Matrix4f()
                 .translate(0f, -minY * scaleFactor, 0f)
                 .scale(scaleFactor);
-        Matrix4f inverseXf = new Matrix4f(xf).invert();
 
-        for (Vertex v : vertices) {
-            Vector3f scaledVertex = xf.transformPosition(new Vector3f(v.position.x, v.position.y, v.position.z));
-            v.position = new Float3(scaledVertex.x, scaledVertex.y, scaledVertex.z);
+        List<SkinnedVertex> normalizedVertices = new ArrayList<>(model.vertices.size());
+        for (SkinnedVertex skinned : model.vertices) {
+            Vertex v = skinned.vertex;
+            Vector3f position = xf.transformPosition(new Vector3f(v.position.x, v.position.y, v.position.z));
+            Vector3f normal = new Vector3f(v.normals.x, v.normals.y, v.normals.z);
+            if (normal.lengthSquared() > 0f) normal.normalize();
+            Vertex normalized = new Vertex(new Float3(position.x, position.y, position.z),
+                    new Float3(normal.x, normal.y, normal.z), new Float2(v.textureUV.u, v.textureUV.v), v.texture, v.color);
+            normalizedVertices.add(new SkinnedVertex(normalized, skinned.boneIds, skinned.weights));
         }
 
         List<SkinnedModel.Bone> bones = new ArrayList<>(model.bones.size());
         List<Matrix4f> localBinds = new ArrayList<>(model.bones.size());
         for (SkinnedModel.Bone bone : model.bones) {
-            localBinds.add(new Matrix4f(xf).mul(bone.localBind()).mul(inverseXf));
+            localBinds.add(bone.parentIndex() < 0
+                    ? new Matrix4f(xf).mul(bone.localBind())
+                    : new Matrix4f(bone.localBind()));
         }
 
         Matrix4f[] globalBinds = new Matrix4f[model.bones.size()];
@@ -74,7 +91,7 @@ public class ModelNormalizer {
             bones.add(new SkinnedModel.Bone(model.bones.get(i).name(), model.bones.get(i).parentIndex(), localBind, inverseGlobalBind));
         }
 
-        return new SkinnedModel(bones, model.vertices, model.animations);
+        return model.withNormalizedGeometry(bones, normalizedVertices, xf);
     }
 
     private static Matrix4f globalBind(int boneIndex, List<SkinnedModel.Bone> bones, List<Matrix4f> localBinds, Matrix4f[] globalBinds) {
@@ -97,7 +114,7 @@ public class ModelNormalizer {
             if(v.position.y < minY){
                 minY = v.position.y;
             }
-            else if (v.position.y > maxY){
+            if (v.position.y > maxY){
                 maxY = v.position.y;
             }
         }

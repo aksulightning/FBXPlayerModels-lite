@@ -17,8 +17,6 @@ import net.minecraft.entity.EntityPose;
 import net.minecraft.entity.LivingEntity;
 import net.minecraft.text.StringVisitable;
 import net.minecraft.text.Text;
-import net.minecraft.util.Arm;
-import net.minecraft.util.Hand;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.RotationAxis;
@@ -57,12 +55,12 @@ public abstract class RenderMixin <T extends LivingEntity> implements LivingEnti
             if(cacheResult.skinnedModel != null){
                 String animation = fbx_player_models$currentAnimation(renderedPlayer, tickDelta);
                 float seconds = (renderedPlayer.age + tickDelta) / 20f;
-                boolean idle = "Idle".equals(animation);
-                CustomModelPose.HeadLookRotation headLookRotation = idle && player != null
+                boolean applyHeadLook = !"Sleep".equals(animation);
+                CustomModelPose.HeadLookRotation headLookRotation = applyHeadLook && player != null
                         ? CustomModelPose.computeHeadLookRotation(player, tickDelta)
                         : CustomModelPose.HeadLookRotation.NONE;
-                CustomModelPose.LimbPose limbPose = fbx_player_models$computeMinecraftLimbPose(renderedPlayer, tickDelta, animation);
-                fbx_player_models$logHeadLookDebug(animation, renderedPlayer, tickDelta, idle && player != null);
+                CustomModelPose.LimbPose limbPose = CustomModelPose.computeLimbPose(renderedPlayer, tickDelta, animation);
+                fbx_player_models$logHeadLookDebug(animation, renderedPlayer, tickDelta, applyHeadLook && player != null);
                 vertices = cacheResult.skinnedModel.render(animation, seconds, headLookRotation, limbPose);
             }
 
@@ -178,98 +176,13 @@ public abstract class RenderMixin <T extends LivingEntity> implements LivingEnti
     }
 
     @Unique
-    private CustomModelPose.LimbPose fbx_player_models$computeMinecraftLimbPose(AbstractClientPlayerEntity renderedPlayer, float tickDelta, String animation) {
-        if ("Sit".equals(animation)) {
-            return fbx_player_models$sittingLimbPose();
-        }
-        if (!"Walk".equals(animation) && !"Sneak".equals(animation)) {
-            return fbx_player_models$handActionPose(renderedPlayer, tickDelta);
-        }
-
-        boolean sneaking = "Sneak".equals(animation);
-        float limbProgress = renderedPlayer.limbAnimator.getPos(tickDelta);
-        float limbAmplitude = renderedPlayer.limbAnimator.getSpeed(tickDelta);
-        if (limbAmplitude <= 0.01f && fbx_player_models$horizontalMovementSquared(renderedPlayer) > 0.0004) {
-            limbProgress = (renderedPlayer.age + tickDelta) * 0.9f;
-            limbAmplitude = sneaking ? 0.45f : 1.0f;
-        }
-        float armAmplitude = limbAmplitude;
-        float legAmplitude = 1.4f * limbAmplitude;
-        float sneakArmPitch = sneaking ? 0.4f : 0f;
-
-        return new CustomModelPose.LimbPose(
-                new CustomModelPose.BodyPartRotation(MathHelper.cos(limbProgress * 0.6662f + MathHelper.PI) * armAmplitude + sneakArmPitch, 0f, 0f),
-                new CustomModelPose.BodyPartRotation(MathHelper.cos(limbProgress * 0.6662f) * armAmplitude + sneakArmPitch, 0f, 0f),
-                new CustomModelPose.BodyPartRotation(MathHelper.cos(limbProgress * 0.6662f) * legAmplitude, 0.005f, 0.005f),
-                new CustomModelPose.BodyPartRotation(MathHelper.cos(limbProgress * 0.6662f + MathHelper.PI) * legAmplitude, -0.005f, -0.005f)
-        ).withArmAction(fbx_player_models$handActionPose(renderedPlayer, tickDelta));
-    }
-
-    @Unique
-    private CustomModelPose.LimbPose fbx_player_models$sittingLimbPose() {
-        return new CustomModelPose.LimbPose(
-                new CustomModelPose.BodyPartRotation(-0.62831855f, 0f, 0f),
-                new CustomModelPose.BodyPartRotation(-0.62831855f, 0f, 0f),
-                new CustomModelPose.BodyPartRotation(-1.5707964f, 0f, 0f),
-                new CustomModelPose.BodyPartRotation(-1.5707964f, 0f, 0f)
-        );
-    }
-
-    @Unique
-    private CustomModelPose.LimbPose fbx_player_models$handActionPose(AbstractClientPlayerEntity renderedPlayer, float tickDelta) {
-        MinecraftClient client = MinecraftClient.getInstance();
-        boolean breakingBlock = renderedPlayer == client.player
-                && client.interactionManager != null
-                && client.interactionManager.isBreakingBlock();
-
-        if (breakingBlock) {
-            float phase = ((renderedPlayer.age + tickDelta) % 8f) / 8f;
-            Hand hand = renderedPlayer.handSwinging ? renderedPlayer.preferredHand : Hand.MAIN_HAND;
-            return fbx_player_models$singleArmPose(renderedPlayer, hand, fbx_player_models$breakingRotation(phase));
-        }
-
-        float swing = renderedPlayer.getHandSwingProgress(tickDelta);
-        if (swing <= 0f) {
-            return CustomModelPose.LimbPose.NONE;
-        }
-
-        return fbx_player_models$singleArmPose(renderedPlayer, renderedPlayer.preferredHand, fbx_player_models$placingRotation(swing));
-    }
-
-    @Unique
-    private CustomModelPose.LimbPose fbx_player_models$singleArmPose(AbstractClientPlayerEntity player, Hand hand, CustomModelPose.BodyPartRotation rotation) {
-        boolean rightArm = fbx_player_models$isRightArm(player, hand);
-        return rightArm
-                ? CustomModelPose.LimbPose.NONE.withRightArm(rotation)
-                : CustomModelPose.LimbPose.NONE.withLeftArm(rotation);
-    }
-
-    @Unique
-    private boolean fbx_player_models$isRightArm(AbstractClientPlayerEntity player, Hand hand) {
-        boolean mainArmRight = player.getMainArm() == Arm.RIGHT;
-        return hand == Hand.MAIN_HAND == mainArmRight;
-    }
-
-    @Unique
-    private CustomModelPose.BodyPartRotation fbx_player_models$breakingRotation(float phase) {
-        float chop = MathHelper.sin(phase * MathHelper.TAU);
-        return new CustomModelPose.BodyPartRotation(-1.15f - 0.55f * chop, 0.18f * chop, 0.12f * chop);
-    }
-
-    @Unique
-    private CustomModelPose.BodyPartRotation fbx_player_models$placingRotation(float swing) {
-        float ease = MathHelper.sin(MathHelper.sqrt(swing) * MathHelper.PI);
-        return new CustomModelPose.BodyPartRotation(-0.45f - 0.85f * ease, 0f, 0.18f * ease);
-    }
-
-    @Unique
     private void fbx_player_models$logHeadLookDebug(String animation, AbstractClientPlayerEntity renderedPlayer, float tickDelta, boolean usedPlayerLookRotation) {
         if (!fbx_player_models$debugHeadLook || fbx_player_models$headLookDebugLogged) {
             return;
         }
 
         float bodyYaw = MathHelper.lerpAngleDegrees(tickDelta, renderedPlayer.prevBodyYaw, renderedPlayer.bodyYaw);
-        float headYaw = MathHelper.lerpAngleDegrees(tickDelta, renderedPlayer.prevHeadYaw, renderedPlayer.getHeadYaw());
+        float headYaw = MathHelper.lerpAngleDegrees(tickDelta, renderedPlayer.prevYaw, renderedPlayer.getYaw());
         float relativeHeadYaw = MathHelper.wrapDegrees(headYaw - bodyYaw);
         float pitch = MathHelper.lerp(tickDelta, renderedPlayer.prevPitch, renderedPlayer.getPitch());
 

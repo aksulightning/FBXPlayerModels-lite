@@ -1,15 +1,17 @@
 package me.onethecrazy.util.parsing;
 
 import me.onethecrazy.FBXPlayerModelsMod;
+import com.aksulightning.fbxplayermodels.model.FbxCoordinateSpace;
 import me.onethecrazy.FBXPlayerModels;
 import me.onethecrazy.util.objects.Float2;
 import me.onethecrazy.util.objects.Float3;
 import me.onethecrazy.util.objects.SkinnedModel;
 import me.onethecrazy.util.objects.SkinnedVertex;
 import me.onethecrazy.util.objects.Vertex;
-import net.minecraft.resources.Identifier;
 import me.onethecrazy.util.model.animation.LogicalRigAnimator;
+import net.minecraft.resources.Identifier;
 import org.joml.Matrix4f;
+import org.joml.Matrix3f;
 import org.joml.Vector3f;
 
 import java.nio.ByteBuffer;
@@ -112,16 +114,9 @@ public class FBXParser implements IParser {
                 return assimp;
             }
 
-            Optional<SkinnedModel> fallback = parseSkinnedBinaryFallback(path);
-            if (fallback.isPresent() && hasBoundSkinnedTexture(fallback.get())) {
-                FBXPlayerModelsMod.LOGGER.info("Assimp FBX skinned import produced no bound texture; using internal FBX embedded/material parser result");
-                return fallback;
-            }
-
-            Optional<List<Vertex>> staticFallback = parseBinaryFallback(path);
-            if (staticFallback.isPresent() && hasBoundTexture(staticFallback.get())) {
-                FBXPlayerModelsMod.LOGGER.info("Assimp FBX skinned import produced no bound texture; using static internal FBX material path so embedded textures render");
-                return Optional.empty();
+            Optional<List<Vertex>> materialFallback = parseBinaryFallback(path);
+            if (materialFallback.isPresent() && hasBoundTexture(materialFallback.get())) {
+                return Optional.of(recoverMaterials(assimp.get(), materialFallback.get()));
             }
             return assimp;
         }
@@ -142,24 +137,43 @@ public class FBXParser implements IParser {
             SceneIndex index = new SceneIndex(root);
             MaterialResolver materials = new MaterialResolver(root, path);
 
+            if (index.nodesOfType("Model", "LimbNode").isEmpty() && index.nodesOfType("Deformer", "Cluster").isEmpty()) {
+                lastRigStatus = "no imported skeleton";
+                return Optional.empty();
+            }
+            FallbackSkeleton skeleton = fallbackSkeleton(index);
+            List<SkinnedVertex> vertices = new ArrayList<>();
             for (BinaryNode geometry : root.findAll("Geometry")) {
                 if (geometry.properties.size() < 3 || !"Mesh".equals(geometry.stringProperty(2))) {
                     continue;
                 }
-
-                Optional<SkinnedModel> model = buildSkinnedModel(index, geometry, materials);
-                if (model.isPresent()) {
-                    return model;
+                MeshData mesh = MeshData.from(geometry, materials);
+                List<BoneWeights> weights = new ArrayList<>(mesh.positions.size());
+                for (int i = 0; i < mesh.positions.size(); i++) weights.add(new BoneWeights());
+                long skinId = index.firstConnectedOfType(geometry.longProperty(0), "Deformer", "Skin");
+                if (skinId != Long.MIN_VALUE) {
+                    for (BinaryNode cluster : index.connectedOfType(skinId, "Deformer", "Cluster")) {
+                        Integer boneIndex = skeleton.indices.get(clusterBoneId(index, cluster));
+                        if (boneIndex == null) continue;
+                        List<Integer> ids = intListProperty(cluster.child("Indexes"));
+                        List<Float> values = floatListProperty(cluster.child("Weights"));
+                        for (int i = 0; i < ids.size() && i < values.size(); i++) {
+                            int id = ids.get(i);
+                            if (id >= 0 && id < weights.size()) weights.get(id).add(boneIndex, values.get(i));
+                        }
+                    }
                 }
-
-                model = buildArmatureFallbackModel(index, geometry, materials);
-                if (model.isPresent()) {
-                    return model;
-                }
+                List<SkinnedVertex> meshVertices = mesh.toSkinnedVertices(weights);
+                transformFallbackMesh(meshVertices.stream().map(vertex -> vertex.vertex).toList(), geometryTransform(index, skeleton, geometry));
+                vertices.addAll(meshVertices);
             }
-
-            lastRigStatus = "no skinned geometry found";
-            return Optional.empty();
+            if (vertices.isEmpty() || skeleton.bones.isEmpty()) {
+                lastRigStatus = "no skinned geometry found";
+                return Optional.empty();
+            }
+            SkinnedModel model = new SkinnedModel(skeleton.bones, vertices, LogicalRigAnimator.proceduralAnimations(skeleton.bones, null));
+            setRigStatus("internal skinned bones=" + skeleton.bones.size() + " weighted=" + model.weightedVertexCount() + "/" + vertices.size());
+            return Optional.of(model);
         } catch (Exception e) {
             lastRigStatus = "error: " + e.getClass().getSimpleName();
             FBXPlayerModelsMod.LOGGER.warn("Failed to parse skinned FBX model", e);
@@ -180,148 +194,107 @@ public class FBXParser implements IParser {
         }
     }
 
-    private Optional<SkinnedModel> buildSkinnedModel(SceneIndex index, BinaryNode geometry, MaterialResolver materials) {
-        long geometryId = geometry.longProperty(0);
-        long skinId = index.firstConnectedOfType(geometryId, "Deformer", "Skin");
-        if (skinId == Long.MIN_VALUE) {
-            skinId = index.firstNodeOfType("Deformer", "Skin");
-            if (skinId == Long.MIN_VALUE) {
-                setRigStatus("geometry " + geometryId + " has no Skin deformer");
-                return Optional.empty();
-            }
-            FBXPlayerModelsMod.LOGGER.info("FBX rig: geometry {} has no direct Skin deformer, trying fallback Skin {}", geometryId, skinId);
-        }
-
-        List<BinaryNode> clusters = index.connectedOfType(skinId, "Deformer", "Cluster");
-        if (clusters.isEmpty()) {
-            clusters = index.nodesOfType("Deformer", "Cluster");
-            if (clusters.isEmpty()) {
-                setRigStatus("skin " + skinId + " has no clusters");
-                return Optional.empty();
-            }
-            FBXPlayerModelsMod.LOGGER.info("FBX rig: skin {} has no direct clusters, trying {} fallback clusters", skinId, clusters.size());
-        }
-
-        List<Long> boneModelIds = new ArrayList<>();
-        List<String> boneNames = new ArrayList<>();
-        List<Matrix4f> globalBinds = new ArrayList<>();
-        List<BoneWeights> weightsByControlPoint = new ArrayList<>();
-
-        for (BinaryNode cluster : clusters) {
-            long boneModelId = index.firstConnectedOfType(cluster.longProperty(0), "Model", "LimbNode");
-            if (boneModelId == Long.MIN_VALUE) {
-                setRigStatus("cluster " + cluster.longProperty(0) + " has no LimbNode");
-                continue;
-            }
-
-            BinaryNode boneModel = index.nodesById.get(boneModelId);
-            String boneName = sanitizeName(boneModel.stringProperty(1));
-            Matrix4f bind = matrixProperty(cluster.child("TransformLink")).map(FBXParser::blenderMatrixToGame).orElse(new Matrix4f());
-
-            int boneIndex = boneModelIds.size();
-            boneModelIds.add(boneModelId);
-            boneNames.add(boneName);
-            globalBinds.add(bind);
-
-            List<Integer> indices = intListProperty(cluster.child("Indexes"));
-            List<Float> weights = floatListProperty(cluster.child("Weights"));
-            for (int i = 0; i < indices.size() && i < weights.size(); i++) {
-                int controlPoint = indices.get(i);
-                while (weightsByControlPoint.size() <= controlPoint) {
-                    weightsByControlPoint.add(new BoneWeights());
-                }
-                weightsByControlPoint.get(controlPoint).add(boneIndex, weights.get(i));
-            }
-        }
-
-        if (boneModelIds.isEmpty()) {
-            setRigStatus("no bones found across " + clusters.size() + " clusters");
-            return Optional.empty();
-        }
-
-        List<SkinnedModel.Bone> bones = buildBones(index, boneModelIds, boneNames, globalBinds);
-
-        MeshData mesh = MeshData.from(geometry, materials);
-        List<SkinnedVertex> skinnedVertices = mesh.toSkinnedVertices(weightsByControlPoint);
-        if (skinnedVertices.isEmpty()) {
-            setRigStatus("no skinned vertices generated");
-            return Optional.empty();
-        }
-
-        int weightedCount = 0;
-        for (SkinnedVertex vertex : skinnedVertices) {
-            if (vertex.boneIds.length > 0) {
-                weightedCount++;
-            }
-        }
-        setRigStatus("skinned bones=" + bones.size() + " clusters=" + clusters.size() + " weighted=" + weightedCount + "/" + skinnedVertices.size());
-
-        return Optional.of(new SkinnedModel(bones, skinnedVertices, LogicalRigAnimator.proceduralAnimations(bones, null)));
-    }
-
     private static void setRigStatus(String status) {
         lastRigStatus = status;
         FBXPlayerModelsMod.LOGGER.info("FBX rig: {}", status);
     }
 
-    private Optional<SkinnedModel> buildArmatureFallbackModel(SceneIndex index, BinaryNode geometry, MaterialResolver materials) {
-        List<BinaryNode> boneNodes = index.nodesOfType("Model", "LimbNode");
-        if (boneNodes.isEmpty()) {
-            setRigStatus("no Skin deformer and no Armature LimbNode bones");
-            return Optional.empty();
-        }
+    private record FallbackSkeleton(List<SkinnedModel.Bone> bones, Map<Long, Integer> indices, Map<Long, Matrix4f> globals) {}
 
-        List<Long> boneModelIds = orderedBoneIds(index, boneNodes);
-        Map<Long, Matrix4f> localBindById = new HashMap<>();
-        for (long boneId : boneModelIds) {
-            localBindById.put(boneId, modelLocalBind(index.nodesById.get(boneId)));
+    private static long clusterBoneId(SceneIndex index, BinaryNode cluster) {
+        for (long id : index.objectChildren.getOrDefault(cluster.longProperty(0), List.of())) {
+            BinaryNode node = index.nodesById.get(id);
+            if (node != null && "Model".equals(node.name)) return id;
         }
+        return Long.MIN_VALUE;
+    }
 
-        Map<Long, Integer> boneIndexByModelId = new HashMap<>();
-        for (int i = 0; i < boneModelIds.size(); i++) {
-            boneIndexByModelId.put(boneModelIds.get(i), i);
+    private static FallbackSkeleton fallbackSkeleton(SceneIndex index) {
+        List<BinaryNode> models = index.nodesById.values().stream().filter(node -> "Model".equals(node.name)).toList();
+        List<Long> ids = orderedBoneIds(index, models);
+        Map<Long, Matrix4f> clusterBinds = new HashMap<>();
+        for (BinaryNode cluster : index.nodesOfType("Deformer", "Cluster")) {
+            long id = clusterBoneId(index, cluster);
+            matrixProperty(cluster.child("TransformLink")).ifPresent(bind -> clusterBinds.putIfAbsent(id, bind));
         }
-
-        Matrix4f[] globalBinds = new Matrix4f[boneModelIds.size()];
-        for (int i = 0; i < boneModelIds.size(); i++) {
-            long boneId = boneModelIds.get(i);
-            long parentId = index.parentOf.getOrDefault(boneId, Long.MIN_VALUE);
-            Integer parentIndex = boneIndexByModelId.get(parentId);
-            Matrix4f localBind = localBindById.get(boneId);
-            globalBinds[i] = parentIndex != null
-                    ? new Matrix4f(globalBinds[parentIndex]).mul(localBind)
-                    : new Matrix4f(localBind);
+        List<SkinnedModel.Bone> bones = new ArrayList<>(ids.size() + 1);
+        bones.add(new SkinnedModel.Bone(FbxCoordinateSpace.ROOT_NAME, -1, new Matrix4f(index.sceneToModel), new Matrix4f(index.sceneToModel).invert()));
+        Map<Long, Integer> indices = new HashMap<>();
+        Map<Long, Matrix4f> globals = new HashMap<>();
+        for (long id : ids) {
+            BinaryNode node = index.nodesById.get(id);
+            long parentId = index.parentOf.getOrDefault(id, Long.MIN_VALUE);
+            int parentIndex = indices.getOrDefault(parentId, 0);
+            Matrix4f local = modelLocalBind(node);
+            Matrix4f global = parentIndex > 0 ? new Matrix4f(globals.get(parentId)).mul(local) : new Matrix4f(local);
+            if (clusterBinds.containsKey(id)) {
+                global = new Matrix4f(clusterBinds.get(id));
+                local = parentIndex > 0 ? new Matrix4f(globals.get(parentId)).invert().mul(global) : new Matrix4f(global);
+            }
+            indices.put(id, bones.size());
+            globals.put(id, global);
+            bones.add(new SkinnedModel.Bone(sanitizeName(node.stringProperty(1)), parentIndex, local, new Matrix4f(index.sceneToModel).mul(global).invert()));
         }
+        return new FallbackSkeleton(bones, indices, globals);
+    }
 
-        List<SkinnedModel.Bone> bones = new ArrayList<>();
-        for (int i = 0; i < boneModelIds.size(); i++) {
-            long boneId = boneModelIds.get(i);
-            long parentId = index.parentOf.getOrDefault(boneId, Long.MIN_VALUE);
-            int parentIndex = boneIndexByModelId.getOrDefault(parentId, -1);
-            BinaryNode boneNode = index.nodesById.get(boneId);
-            bones.add(new SkinnedModel.Bone(
-                    sanitizeName(boneNode.stringProperty(1)),
-                    parentIndex,
-                    localBindById.get(boneId),
-                    new Matrix4f(globalBinds[i]).invert()
-            ));
+    private static Matrix4f geometryTransform(SceneIndex index, FallbackSkeleton skeleton, BinaryNode geometry) {
+        for (long id : index.objectParents.getOrDefault(geometry.longProperty(0), List.of())) {
+            BinaryNode node = index.nodesById.get(id);
+            if (node != null && "Model".equals(node.name) && skeleton.globals.containsKey(id)) {
+                Matrix4f geometric = new Matrix4f().translation(propertyVector(node, "GeometricTranslation", new Vector3f()));
+                rotateFbx(geometric, propertyVector(node, "GeometricRotation", new Vector3f()), 0);
+                geometric.scale(propertyVector(node, "GeometricScaling", new Vector3f(1f)));
+                return new Matrix4f(index.sceneToModel).mul(skeleton.globals.get(id)).mul(geometric);
+            }
         }
+        return new Matrix4f(index.sceneToModel);
+    }
 
-        MeshData mesh = MeshData.from(geometry, materials);
-        List<BoneWeights> weights = semanticRigWeights(mesh.positions, bones, globalBinds);
-        List<SkinnedVertex> skinnedVertices = mesh.toSkinnedVertices(weights);
-        if (skinnedVertices.isEmpty()) {
-            setRigStatus("armature fallback found bones but no vertices");
-            return Optional.empty();
+    private static void transformFallbackMesh(List<Vertex> vertices, Matrix4f transform) {
+        Matrix3f normalTransform = transform.normal(new Matrix3f());
+        for (Vertex vertex : vertices) {
+            Vector3f p = transform.transformPosition(new Vector3f(vertex.position.x, vertex.position.y, vertex.position.z));
+            Vector3f n = normalTransform.transform(new Vector3f(vertex.normals.x, vertex.normals.y, vertex.normals.z));
+            if (n.lengthSquared() > 0f) n.normalize();
+            vertex.position = new Float3(p.x, p.y, p.z);
+            vertex.normals = new Float3(n.x, n.y, n.z);
         }
+    }
 
-        setRigStatus("armature fallback bones=" + bones.size() + " autoWeighted=" + skinnedVertices.size() + "/" + skinnedVertices.size());
-        return Optional.of(new SkinnedModel(bones, skinnedVertices, LogicalRigAnimator.proceduralAnimations(bones, null)));
+    private record MaterialVertexKey(long x, long y, long z, long u, long v) {
+        static MaterialVertexKey of(Vertex vertex) {
+            return new MaterialVertexKey(Math.round(vertex.position.x * 10000d), Math.round(vertex.position.y * 10000d),
+                    Math.round(vertex.position.z * 10000d), Math.round(vertex.textureUV.u * 10000d), Math.round(vertex.textureUV.v * 10000d));
+        }
+    }
+
+    private static SkinnedModel recoverMaterials(SkinnedModel model, List<Vertex> fallback) {
+        Map<MaterialVertexKey, Vertex> appearances = new HashMap<>();
+        java.util.Set<MaterialVertexKey> ambiguous = new java.util.HashSet<>();
+        for (Vertex vertex : fallback) {
+            if (WHITE.equals(vertex.texture)) continue;
+            MaterialVertexKey key = MaterialVertexKey.of(vertex);
+            Vertex previous = appearances.putIfAbsent(key, vertex);
+            if (previous != null && (!previous.texture.equals(vertex.texture) || previous.color != vertex.color)) ambiguous.add(key);
+        }
+        List<SkinnedVertex> vertices = new ArrayList<>(model.vertices.size());
+        for (SkinnedVertex skinned : model.vertices) {
+            Vertex original = skinned.vertex;
+            MaterialVertexKey key = MaterialVertexKey.of(original);
+            Vertex appearance = ambiguous.contains(key) ? null : appearances.get(key);
+            if (appearance == null || !WHITE.equals(original.texture)) {
+                vertices.add(skinned);
+            } else {
+                vertices.add(new SkinnedVertex(new Vertex(original.position, original.normals, original.textureUV, appearance.texture, appearance.color), skinned.boneIds, skinned.weights));
+            }
+        }
+        return model.withVertices(vertices);
     }
 
     private static List<Long> orderedBoneIds(SceneIndex index, List<BinaryNode> boneNodes) {
         List<Long> result = new ArrayList<>();
-        Map<Long, BinaryNode> remaining = new HashMap<>();
+        Map<Long, BinaryNode> remaining = new LinkedHashMap<>();
 
         for (BinaryNode boneNode : boneNodes) {
             remaining.put(boneNode.longProperty(0), boneNode);
@@ -357,14 +330,40 @@ public class FBXParser implements IParser {
     }
 
     private static Matrix4f modelLocalBind(BinaryNode model) {
-        Vector3f translation = blenderToGame(propertyVector(model, "Lcl Translation", new Vector3f()));
-        Vector3f rotation = blenderToGame(propertyVector(model, "Lcl Rotation", new Vector3f()));
-        Vector3f scale = propertyVector(model, "Lcl Scaling", new Vector3f(1f, 1f, 1f));
+        Vector3f rotationPivot = propertyVector(model, "RotationPivot", new Vector3f());
+        Vector3f scalePivot = propertyVector(model, "ScalingPivot", new Vector3f());
+        Matrix4f local = new Matrix4f().translation(propertyVector(model, "Lcl Translation", new Vector3f()))
+                .translate(propertyVector(model, "RotationOffset", new Vector3f())).translate(rotationPivot);
+        rotateFbx(local, propertyVector(model, "PreRotation", new Vector3f()), 0);
+        rotateFbx(local, propertyVector(model, "Lcl Rotation", new Vector3f()), (int) propertyNumber(model, "RotationOrder", 0));
+        Matrix4f post = rotateFbx(new Matrix4f(), propertyVector(model, "PostRotation", new Vector3f()), 0).invert();
+        local.mul(post).translate(-rotationPivot.x, -rotationPivot.y, -rotationPivot.z)
+                .translate(propertyVector(model, "ScalingOffset", new Vector3f())).translate(scalePivot)
+                .scale(propertyVector(model, "Lcl Scaling", new Vector3f(1f)))
+                .translate(-scalePivot.x, -scalePivot.y, -scalePivot.z);
+        return local;
+    }
 
-        return new Matrix4f()
-                .translate(translation)
-                .rotateXYZ((float) Math.toRadians(rotation.x), (float) Math.toRadians(rotation.y), (float) Math.toRadians(rotation.z))
-                .scale(scale);
+    private static Matrix4f rotateFbx(Matrix4f matrix, Vector3f degrees, int order) {
+        float x = (float) Math.toRadians(degrees.x), y = (float) Math.toRadians(degrees.y), z = (float) Math.toRadians(degrees.z);
+        return switch (order) {
+            case 1 -> matrix.rotateX(x).rotateZ(z).rotateY(y);
+            case 2 -> matrix.rotateY(y).rotateZ(z).rotateX(x);
+            case 3 -> matrix.rotateY(y).rotateX(x).rotateZ(z);
+            case 4 -> matrix.rotateZ(z).rotateX(x).rotateY(y);
+            case 5 -> matrix.rotateZ(z).rotateY(y).rotateX(x);
+            default -> matrix.rotateXYZ(x, y, z);
+        };
+    }
+
+    private static float propertyNumber(BinaryNode model, String name, float fallback) {
+        BinaryNode properties = model == null ? null : model.child("Properties70");
+        if (properties != null) {
+            for (BinaryNode property : properties.children) {
+                if ("P".equals(property.name) && name.equals(property.stringProperty(0))) return floatProperty(property, 4, fallback);
+            }
+        }
+        return fallback;
     }
 
     private static Vector3f propertyVector(BinaryNode model, String propertyName, Vector3f fallback) {
@@ -392,150 +391,13 @@ public class FBXParser implements IParser {
         return new Vector3f(fallback);
     }
 
-    private static List<BoneWeights> semanticRigWeights(List<Float3> positions, List<SkinnedModel.Bone> bones, Matrix4f[] globalBinds) {
-        int head = boneIndex(bones, "head");
-        int rightArm = boneIndex(bones, "rightarm");
-        int leftArm = boneIndex(bones, "leftarm");
-        int rightLeg = boneIndex(bones, "rightleg");
-        int leftLeg = boneIndex(bones, "leftleg");
-        int chest = boneIndex(bones, "chest");
-        int back = boneIndex(bones, "back");
-        int hips = boneIndex(bones, "hips");
-
-        if (head < 0 && rightArm < 0 && leftArm < 0 && rightLeg < 0 && leftLeg < 0) {
-            return nearestBoneWeights(positions, globalBinds);
-        }
-
-        float minX = Float.POSITIVE_INFINITY;
-        float maxX = Float.NEGATIVE_INFINITY;
-        float minY = Float.POSITIVE_INFINITY;
-        float maxY = Float.NEGATIVE_INFINITY;
-
-        for (Float3 position : positions) {
-            minX = Math.min(minX, position.x);
-            maxX = Math.max(maxX, position.x);
-            minY = Math.min(minY, position.y);
-            maxY = Math.max(maxY, position.y);
-        }
-
-        float centerX = (minX + maxX) * 0.5f;
-        float width = Math.max(0.001f, maxX - minX);
-        float height = Math.max(0.001f, maxY - minY);
-        float sideThreshold = width * 0.18f;
-
-        List<BoneWeights> weights = new ArrayList<>(positions.size());
-        for (Float3 position : positions) {
-            float y01 = (position.y - minY) / height;
-            float xOffset = position.x - centerX;
-
-            int bone = -1;
-            if (head >= 0 && y01 > 0.78f) {
-                bone = head;
-            } else if (y01 < 0.48f && xOffset >= 0f && rightLeg >= 0) {
-                bone = rightLeg;
-            } else if (y01 < 0.48f && xOffset < 0f && leftLeg >= 0) {
-                bone = leftLeg;
-            } else if (y01 >= 0.38f && y01 < 0.82f && xOffset > sideThreshold && rightArm >= 0) {
-                bone = rightArm;
-            } else if (y01 >= 0.38f && y01 < 0.82f && xOffset < -sideThreshold && leftArm >= 0) {
-                bone = leftArm;
-            } else if (chest >= 0 && y01 >= 0.55f) {
-                bone = chest;
-            } else if (back >= 0 && y01 >= 0.35f) {
-                bone = back;
-            } else if (hips >= 0) {
-                bone = hips;
-            }
-
-            if (bone < 0) {
-                bone = nearestBone(position, globalBinds);
-            }
-
-            BoneWeights weight = new BoneWeights();
-            weight.add(bone, 1f);
-            weights.add(weight);
-        }
-
-        return weights;
-    }
-
-    private static int boneIndex(List<SkinnedModel.Bone> bones, String wantedName) {
-        for (int i = 0; i < bones.size(); i++) {
-            if (isExactBone(normalizedBoneName(bones.get(i).name()), wantedName)) {
-                return i;
-            }
-        }
-
-        return -1;
-    }
-
-    private static List<BoneWeights> nearestBoneWeights(List<Float3> positions, Matrix4f[] globalBinds) {
-        List<Vector3f> bonePositions = new ArrayList<>(globalBinds.length);
-        for (Matrix4f globalBind : globalBinds) {
-            bonePositions.add(globalBind.getTranslation(new Vector3f()));
-        }
-
-        List<BoneWeights> weights = new ArrayList<>(positions.size());
-        for (Float3 position : positions) {
-            BoneWeights weight = new BoneWeights();
-            weight.add(nearestBone(position, globalBinds), 1f);
-            weights.add(weight);
-        }
-
-        return weights;
-    }
-
-    private static int nearestBone(Float3 position, Matrix4f[] globalBinds) {
-        Vector3f p = new Vector3f(position.x, position.y, position.z);
-        int nearest = 0;
-        float nearestDist = Float.POSITIVE_INFINITY;
-
-        for (int i = 0; i < globalBinds.length; i++) {
-            float dist = p.distanceSquared(globalBinds[i].getTranslation(new Vector3f()));
-            if (dist < nearestDist) {
-                nearestDist = dist;
-                nearest = i;
-            }
-        }
-
-        return nearest;
-    }
-
-    private List<SkinnedModel.Bone> buildBones(SceneIndex index, List<Long> boneModelIds, List<String> boneNames, List<Matrix4f> globalBinds) {
-        Map<Long, Integer> boneIndexByModelId = new HashMap<>();
-        for (int i = 0; i < boneModelIds.size(); i++) {
-            boneIndexByModelId.put(boneModelIds.get(i), i);
-        }
-
-        List<SkinnedModel.Bone> bones = new ArrayList<>();
-        for (int i = 0; i < boneModelIds.size(); i++) {
-            int parentIndex = -1;
-            long parentModelId = index.parentOf.getOrDefault(boneModelIds.get(i), Long.MIN_VALUE);
-            while (parentModelId != Long.MIN_VALUE) {
-                Integer candidate = boneIndexByModelId.get(parentModelId);
-                if (candidate != null) {
-                    parentIndex = candidate;
-                    break;
-                }
-                parentModelId = index.parentOf.getOrDefault(parentModelId, Long.MIN_VALUE);
-            }
-
-            Matrix4f globalBind = globalBinds.get(i);
-            Matrix4f localBind = parentIndex >= 0
-                    ? new Matrix4f(globalBinds.get(parentIndex)).invert().mul(globalBind)
-                    : new Matrix4f(globalBind);
-
-            bones.add(new SkinnedModel.Bone(boneNames.get(i), parentIndex, localBind, new Matrix4f(globalBind).invert()));
-        }
-
-        return bones;
-    }
-
     private Optional<List<Vertex>> parseBinary(byte[] bytes, Path sourcePath) {
         try {
             BinaryFbxReader reader = new BinaryFbxReader(bytes);
             BinaryNode root = reader.readRoot();
             MaterialResolver materials = new MaterialResolver(root, sourcePath);
+            SceneIndex index = new SceneIndex(root);
+            FallbackSkeleton skeleton = fallbackSkeleton(index);
             List<Vertex> vertices = new ArrayList<>();
 
             for (BinaryNode geometry : root.findAll("Geometry")) {
@@ -544,7 +406,9 @@ public class FBXParser implements IParser {
                 }
 
                 MeshData mesh = MeshData.from(geometry, materials);
-                vertices.addAll(mesh.toVertices());
+                List<Vertex> meshVertices = mesh.toVertices();
+                transformFallbackMesh(meshVertices, geometryTransform(index, skeleton, geometry));
+                vertices.addAll(meshVertices);
             }
 
             return vertices.isEmpty() ? Optional.empty() : Optional.of(vertices);
@@ -615,7 +479,7 @@ public class FBXParser implements IParser {
         static MeshData from(BinaryNode node, MaterialResolver resolver) {
             long geometryId = node.longProperty(0);
             return new MeshData(
-                    blenderToGame(vec3List(floatListProperty(node.child("Vertices")))),
+                    vec3List(floatListProperty(node.child("Vertices"))),
                     intListProperty(node.child("PolygonVertexIndex")),
                     parseNormals(node),
                     parseUvs(node),
@@ -801,7 +665,7 @@ public class FBXParser implements IParser {
         }
 
         int[] boneIds() {
-            int count = Math.min(4, boneIds.size());
+            int count = boneIds.size();
             int[] result = new int[count];
             for (int i = 0; i < count; i++) {
                 result[i] = boneIds.get(i);
@@ -810,99 +674,21 @@ public class FBXParser implements IParser {
         }
 
         float[] weights() {
-            int count = Math.min(4, weights.size());
+            int count = weights.size();
             float[] result = new float[count];
-            float total = 0f;
 
             for (int i = 0; i < count; i++) {
                 result[i] = weights.get(i);
-                total += result[i];
-            }
-
-            if (total > 0f) {
-                for (int i = 0; i < result.length; i++) {
-                    result[i] /= total;
-                }
             }
 
             return result;
         }
     }
 
-    private static Map<String, SkinnedModel.Animation> generatedAnimations(List<SkinnedModel.Bone> bones) {
-        Map<Integer, SkinnedModel.BoneTrack> idle = new HashMap<>();
-        Map<Integer, SkinnedModel.BoneTrack> walk = new HashMap<>();
-
-        for (int i = 0; i < bones.size(); i++) {
-            String name = normalizedBoneName(bones.get(i).name());
-
-            if (isExactBone(name, "head")) {
-                idle.put(i, new SkinnedModel.BoneTrack(
-                        List.of(),
-                        List.of(
-                                new SkinnedModel.KeyVec3(0f, new Vector3f(0f, 0f, -6f)),
-                                new SkinnedModel.KeyVec3(1f, new Vector3f(0f, 0f, 6f)),
-                                new SkinnedModel.KeyVec3(2f, new Vector3f(0f, 0f, -6f))
-                        ),
-                        List.of()
-                ));
-            }
-
-            if (isMainLeg(name)) {
-                float sign = isRightBone(name) ? -1f : 1f;
-                walk.put(i, new SkinnedModel.BoneTrack(
-                        List.of(),
-                        List.of(
-                                new SkinnedModel.KeyVec3(0f, new Vector3f(0f, 0f, 18f * sign)),
-                                new SkinnedModel.KeyVec3(0.35f, new Vector3f(0f, 0f, -18f * sign)),
-                                new SkinnedModel.KeyVec3(0.7f, new Vector3f(0f, 0f, 18f * sign))
-                        ),
-                        List.of()
-                ));
-            } else if (isMainArm(name)) {
-                float sign = isRightBone(name) ? 1f : -1f;
-                walk.put(i, new SkinnedModel.BoneTrack(
-                        List.of(),
-                        List.of(
-                                new SkinnedModel.KeyVec3(0f, new Vector3f(0f, 0f, 16f * sign)),
-                                new SkinnedModel.KeyVec3(0.35f, new Vector3f(0f, 0f, -16f * sign)),
-                                new SkinnedModel.KeyVec3(0.7f, new Vector3f(0f, 0f, 16f * sign))
-                        ),
-                        List.of()
-                ));
-            }
-        }
-
-        return Map.of(
-                "Idle", new SkinnedModel.Animation(2f, idle),
-                "Walk", new SkinnedModel.Animation(0.7f, walk)
-        );
-    }
-
-    private static String normalizedBoneName(String name) {
-        return name.toLowerCase().replace(" ", "").replace("_", "").replace("-", "");
-    }
-
-    private static boolean isRightBone(String name) {
-        return name.contains("right") || name.endsWith(".r") || name.endsWith("r");
-    }
-
-    private static boolean isExactBone(String name, String boneName) {
-        return name.equals(boneName) || name.endsWith(boneName);
-    }
-
-    private static boolean isMainLeg(String name) {
-        return name.equals("rightleg") || name.equals("leftleg") || name.endsWith("rightleg") || name.endsWith("leftleg");
-    }
-
-    private static boolean isMainArm(String name) {
-        return name.equals("rightarm") || name.equals("leftarm") || name.endsWith("rightarm") || name.endsWith("leftarm");
-    }
-
     private static final class MaterialResolver {
         private final Path sourcePath;
         private final String modelKey;
-        private final Map<Long, BinaryNode> nodesById = new HashMap<>();
+        private final Map<Long, BinaryNode> nodesById = new LinkedHashMap<>();
         private final Map<Long, Long> geometryToModel = new HashMap<>();
         private final Map<Long, List<Long>> geometryToMaterials = new HashMap<>();
         private final Map<Long, List<Long>> modelToMaterials = new HashMap<>();
@@ -1506,7 +1292,7 @@ public class FBXParser implements IParser {
         }
 
         return new LayerData<>(
-                blenderToGame(vec3List(floatListProperty(block.child("Normals")))),
+                vec3List(floatListProperty(block.child("Normals"))),
                 intListProperty(block.child("NormalsIndex")),
                 stringProperty(block.child("MappingInformationType"), LayerData.BY_POLYGON_VERTEX),
                 stringProperty(block.child("ReferenceInformationType"), "Direct")
@@ -1696,10 +1482,6 @@ public class FBXParser implements IParser {
         return new Float3(vector.x, vector.z, -vector.y);
     }
 
-    private static Vector3f blenderToGame(Vector3f vector) {
-        return new Vector3f(vector.x, vector.z, -vector.y);
-    }
-
     private static List<Float> floatListProperty(BinaryNode node) {
         if (node == null || node.properties.isEmpty()) {
             return List.of();
@@ -1815,18 +1597,6 @@ public class FBXParser implements IParser {
         return Optional.of(result);
     }
 
-    private static Matrix4f blenderMatrixToGame(Matrix4f matrix) {
-        Matrix4f basis = new Matrix4f(
-                1f, 0f, 0f, 0f,
-                0f, 0f, -1f, 0f,
-                0f, 1f, 0f, 0f,
-                0f, 0f, 0f, 1f
-        );
-
-        Matrix4f inverseBasis = new Matrix4f(basis).invert();
-        return new Matrix4f(basis).mul(matrix).mul(inverseBasis);
-    }
-
     private static String sanitizeName(String name) {
         int split = name.indexOf('\u0000');
         if (split >= 0) {
@@ -1836,11 +1606,6 @@ public class FBXParser implements IParser {
         int modelPrefix = name.indexOf("Model::");
         if (modelPrefix >= 0) {
             name = name.substring(modelPrefix + "Model::".length());
-        }
-
-        int namespace = name.lastIndexOf(':');
-        if (namespace >= 0 && namespace + 1 < name.length()) {
-            name = name.substring(namespace + 1);
         }
 
         return name;
@@ -1949,12 +1714,15 @@ public class FBXParser implements IParser {
     }
 
     private static final class SceneIndex {
-        final Map<Long, BinaryNode> nodesById = new HashMap<>();
+        final Matrix4f sceneToModel;
+        final Map<Long, BinaryNode> nodesById = new LinkedHashMap<>();
         final Map<Long, List<Long>> objectChildren = new HashMap<>();
         final Map<Long, List<Long>> objectParents = new HashMap<>();
         final Map<Long, Long> parentOf = new HashMap<>();
 
         SceneIndex(BinaryNode root) {
+            BinaryNode settings = root.child("GlobalSettings");
+            sceneToModel = FbxCoordinateSpace.fromUpAxis((int) propertyNumber(settings, "UpAxis", 1), (int) propertyNumber(settings, "UpAxisSign", 1));
             for (BinaryNode node : root.allNodes()) {
                 long id = node.longProperty(0);
                 if (id != Long.MIN_VALUE) {
@@ -1971,7 +1739,10 @@ public class FBXParser implements IParser {
                 long parent = connection.longProperty(2);
                 objectChildren.computeIfAbsent(parent, ignored -> new ArrayList<>()).add(child);
                 objectParents.computeIfAbsent(child, ignored -> new ArrayList<>()).add(parent);
-                parentOf.put(child, parent);
+                BinaryNode childNode = nodesById.get(child), parentNode = nodesById.get(parent);
+                if (childNode != null && parentNode != null && "Model".equals(childNode.name) && "Model".equals(parentNode.name)) {
+                    parentOf.put(child, parent);
+                }
             }
         }
 

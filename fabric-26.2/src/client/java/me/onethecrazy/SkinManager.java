@@ -100,7 +100,12 @@ public final class SkinManager {
 
         Map<String, SkinnedModel.Animation> importedAnimations = new LinkedHashMap<>(model.animations);
         Map<String, SkinnedModel.Animation> animations = new LinkedHashMap<>(importedAnimations);
-        LogicalRigAnimator.proceduralAnimations(model.bones, selectedSkin.binding()).forEach(animations::putIfAbsent);
+        LogicalRigAnimator.proceduralAnimations(model.bones, selectedSkin.binding()).forEach((name, generated) -> {
+            SkinnedModel.Animation existing = animations.get(name);
+            if (existing == null || existing.logicalRigDriven()) {
+                animations.put(name, generated);
+            }
+        });
 
         for (Map.Entry<String, String> entry : selectedSkin.clipMappings().entrySet()) {
             SkinnedModel.Animation mapped = importedAnimations.get(entry.getValue());

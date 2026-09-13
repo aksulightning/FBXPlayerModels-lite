@@ -49,6 +49,11 @@ public class LogicalRigBinding {
         for (String name : importedNames) {
             LogicalBodyPart part = suggestPart(name);
             if (part != null) {
+                if (part == LogicalBodyPart.HEAD && normalize(name).endsWith("head")
+                        && !normalize(best.get(part)).endsWith("head")) {
+                    best.put(part, name);
+                    continue;
+                }
                 best.putIfAbsent(part, name);
             }
         }
@@ -60,8 +65,33 @@ public class LogicalRigBinding {
         return binding;
     }
 
+    public static int resolveBoneIndex(List<String> importedNames, LogicalRigBinding explicit, LogicalBodyPart part) {
+        List<String> names = explicit == null ? List.of() : explicit.namesFor(part);
+        if (names.isEmpty()) {
+            names = autoBind(importedNames).namesFor(part);
+        }
+        for (String name : names) {
+            int exact = importedNames.indexOf(name);
+            if (exact >= 0) {
+                return exact;
+            }
+            for (int i = 0; i < importedNames.size(); i++) {
+                if (normalize(name).equals(normalize(importedNames.get(i)))) {
+                    return i;
+                }
+            }
+        }
+        // An explicit missing binding stays missing instead of selecting a different joint.
+        return -1;
+    }
+
     public static LogicalBodyPart suggestPart(String rawName) {
         String name = normalize(rawName);
+
+        // Assimp pivot helpers keep the joint's name but are not the authored joint itself.
+        if (name.contains("assimpfbx")) {
+            return null;
+        }
 
         if (name.contains("head") || name.contains("neck")) {
             return LogicalBodyPart.HEAD;

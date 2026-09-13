@@ -1,6 +1,7 @@
 package me.onethecrazy.util.parsing;
 
 import me.onethecrazy.FBXPlayerModelsMod;
+import com.aksulightning.fbxplayermodels.model.FbxCoordinateSpace;
 import me.onethecrazy.FBXPlayerModels;
 import me.onethecrazy.util.objects.Float2;
 import me.onethecrazy.util.objects.Float3;
@@ -10,6 +11,7 @@ import me.onethecrazy.util.objects.Vertex;
 import me.onethecrazy.util.model.animation.LogicalRigAnimator;
 import net.minecraft.util.Identifier;
 import org.joml.Matrix4f;
+import org.joml.Matrix3f;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;
 import org.lwjgl.PointerBuffer;
@@ -17,6 +19,7 @@ import org.lwjgl.assimp.*;
 import org.lwjgl.system.MemoryStack;
 
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.IntBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -54,10 +57,12 @@ public class AssimpFBXParser {
                 return Optional.empty();
             }
 
-            for (int meshIndex = 0; meshIndex < scene.mNumMeshes(); meshIndex++) {
-                AIMesh mesh = AIMesh.create(meshes.get(meshIndex));
+            for (MeshInstance instance : meshInstances(scene.mRootNode(), sceneToModel(scene))) {
+                AIMesh mesh = AIMesh.create(meshes.get(instance.meshIndex));
                 MeshAppearance appearance = materials.appearance(mesh.mMaterialIndex());
-                out.addAll(staticVertices(mesh, appearance));
+                List<Vertex> meshVertices = staticVertices(mesh, appearance);
+                transformMesh(meshVertices, instance.globalTransform);
+                out.addAll(meshVertices);
             }
 
             lastStatus = "assimp static meshes=" + scene.mNumMeshes() + " vertices=" + out.size();
@@ -81,15 +86,18 @@ public class AssimpFBXParser {
             }
 
             MaterialResolver materials = new MaterialResolver(scene, path);
-            LinkedHashMap<String, BoneBuild> boneBuilds = collectBones(scene);
-            if (boneBuilds.isEmpty()) {
+            if (!hasMeshBones(scene)) {
                 lastStatus = "assimp: no mesh bones";
                 return Optional.empty();
             }
 
             Map<String, Integer> boneIndex = new HashMap<>();
+            Map<Long, Integer> nodeIndices = new HashMap<>();
             List<SkinnedModel.Bone> bones = new ArrayList<>();
-            buildBoneHierarchy(scene.mRootNode(), -1, boneBuilds, boneIndex, bones);
+            Matrix4f sceneToModel = sceneToModel(scene);
+            // A single wrapper keeps every imported node and animation key in its authored local axes.
+            bones.add(new SkinnedModel.Bone(FbxCoordinateSpace.ROOT_NAME, -1, sceneToModel, new Matrix4f(sceneToModel).invert()));
+            buildBoneHierarchy(scene.mRootNode(), 0, sceneToModel, boneIndex, nodeIndices, bones);
 
             if (bones.isEmpty()) {
                 lastStatus = "assimp: no skeleton nodes";
@@ -97,10 +105,12 @@ public class AssimpFBXParser {
             }
 
             List<SkinnedVertex> out = new ArrayList<>();
-            for (int meshIndex = 0; meshIndex < scene.mNumMeshes(); meshIndex++) {
-                AIMesh mesh = AIMesh.create(meshes.get(meshIndex));
+            for (MeshInstance instance : meshInstances(scene.mRootNode(), sceneToModel(scene))) {
+                AIMesh mesh = AIMesh.create(meshes.get(instance.meshIndex));
                 MeshAppearance appearance = materials.appearance(mesh.mMaterialIndex());
-                out.addAll(skinnedVertices(mesh, appearance, boneIndex));
+                List<SkinnedVertex> meshVertices = skinnedVertices(mesh, appearance, boneIndex, nodeIndices);
+                transformMesh(meshVertices.stream().map(vertex -> vertex.vertex).toList(), instance.globalTransform);
+                out.addAll(meshVertices);
             }
 
             if (out.isEmpty()) {
@@ -128,7 +138,6 @@ public class AssimpFBXParser {
     private AIScene importScene(Path path) {
         int flags = Assimp.aiProcess_Triangulate
                 | Assimp.aiProcess_GenSmoothNormals
-                | Assimp.aiProcess_LimitBoneWeights
                 | Assimp.aiProcess_PopulateArmatureData
                 | Assimp.aiProcess_FlipUVs;
 
@@ -165,7 +174,7 @@ public class AssimpFBXParser {
         return out;
     }
 
-    private static List<SkinnedVertex> skinnedVertices(AIMesh mesh, MeshAppearance appearance, Map<String, Integer> boneIndex) {
+    private static List<SkinnedVertex> skinnedVertices(AIMesh mesh, MeshAppearance appearance, Map<String, Integer> boneIndex, Map<Long, Integer> nodeIndices) {
         List<BoneWeights> weights = new ArrayList<>(mesh.mNumVertices());
         for (int i = 0; i < mesh.mNumVertices(); i++) {
             weights.add(new BoneWeights());
@@ -175,7 +184,9 @@ public class AssimpFBXParser {
         if (bones != null) {
             for (int i = 0; i < mesh.mNumBones(); i++) {
                 AIBone bone = AIBone.create(bones.get(i));
-                Integer index = boneIndex.get(cleanName(bone.mName().dataString()));
+                AINode joint = bone.mNode();
+                Integer index = joint == null ? null : nodeIndices.get(joint.address());
+                if (index == null) index = boneIndex.get(cleanName(bone.mName().dataString()));
                 if (index == null) {
                     continue;
                 }
@@ -231,47 +242,65 @@ public class AssimpFBXParser {
         return new SkinnedVertex(vertex(mesh, index, appearance), weight.boneIds(), weight.weights());
     }
 
-    private static LinkedHashMap<String, BoneBuild> collectBones(AIScene scene) {
-        LinkedHashMap<String, BoneBuild> bones = new LinkedHashMap<>();
+    private static boolean hasMeshBones(AIScene scene) {
         PointerBuffer meshes = scene.mMeshes();
-        if (meshes == null) {
-            return bones;
-        }
-
-        for (int meshIndex = 0; meshIndex < scene.mNumMeshes(); meshIndex++) {
-            AIMesh mesh = AIMesh.create(meshes.get(meshIndex));
-            PointerBuffer meshBones = mesh.mBones();
-            if (meshBones == null) {
-                continue;
-            }
-
-            for (int i = 0; i < mesh.mNumBones(); i++) {
-                AIBone bone = AIBone.create(meshBones.get(i));
-                String name = cleanName(bone.mName().dataString());
-                bones.putIfAbsent(name, new BoneBuild(name, assimpMatrix(bone.mOffsetMatrix())));
+        if (meshes != null) {
+            for (int i = 0; i < scene.mNumMeshes(); i++) {
+                if (AIMesh.create(meshes.get(i)).mNumBones() > 0) return true;
             }
         }
-
-        return bones;
+        return false;
     }
 
-    private static void buildBoneHierarchy(AINode node, int parentIndex, Map<String, BoneBuild> boneBuilds, Map<String, Integer> boneIndex, List<SkinnedModel.Bone> bones) {
+    private static void buildBoneHierarchy(AINode node, int parentIndex, Matrix4f parentGlobal, Map<String, Integer> boneIndex, Map<Long, Integer> nodeIndices, List<SkinnedModel.Bone> bones) {
         String name = cleanName(node.mName().dataString());
-        int currentParent = parentIndex;
-
-        BoneBuild build = boneBuilds.get(name);
-        if (build != null) {
-            int index = bones.size();
-            boneIndex.put(name, index);
-            bones.add(new SkinnedModel.Bone(name, parentIndex, assimpMatrix(node.mTransformation()), build.offsetMatrix));
-            currentParent = index;
-        }
-
+        Matrix4f local = assimpMatrix(node.mTransformation());
+        Matrix4f global = new Matrix4f(parentGlobal).mul(local);
+        int index = bones.size();
+        boneIndex.putIfAbsent(name, index);
+        nodeIndices.put(node.address(), index);
+        // Helpers, armature roots and unweighted joints retain their authored local transforms.
+        bones.add(new SkinnedModel.Bone(name, parentIndex, local, new Matrix4f(global).invert()));
         PointerBuffer children = node.mChildren();
         if (children != null) {
             for (int i = 0; i < node.mNumChildren(); i++) {
-                buildBoneHierarchy(AINode.create(children.get(i)), currentParent, boneBuilds, boneIndex, bones);
+                buildBoneHierarchy(AINode.create(children.get(i)), index, global, boneIndex, nodeIndices, bones);
             }
+        }
+    }
+
+    private record MeshInstance(int meshIndex, Matrix4f globalTransform) {}
+
+    private static List<MeshInstance> meshInstances(AINode root, Matrix4f sceneToModel) {
+        List<MeshInstance> instances = new ArrayList<>();
+        collectMeshInstances(root, sceneToModel, instances);
+        return instances;
+    }
+
+    private static void collectMeshInstances(AINode node, Matrix4f parent, List<MeshInstance> instances) {
+        Matrix4f global = new Matrix4f(parent).mul(assimpMatrix(node.mTransformation()));
+        IntBuffer meshes = node.mMeshes();
+        if (meshes != null) {
+            for (int i = 0; i < node.mNumMeshes(); i++) {
+                instances.add(new MeshInstance(meshes.get(i), new Matrix4f(global)));
+            }
+        }
+        PointerBuffer children = node.mChildren();
+        if (children != null) {
+            for (int i = 0; i < node.mNumChildren(); i++) {
+                collectMeshInstances(AINode.create(children.get(i)), global, instances);
+            }
+        }
+    }
+
+    private static void transformMesh(List<Vertex> vertices, Matrix4f transform) {
+        Matrix3f normalTransform = transform.normal(new Matrix3f());
+        for (Vertex vertex : vertices) {
+            Vector3f position = transform.transformPosition(new Vector3f(vertex.position.x, vertex.position.y, vertex.position.z));
+            Vector3f normal = normalTransform.transform(new Vector3f(vertex.normals.x, vertex.normals.y, vertex.normals.z));
+            if (normal.lengthSquared() > 0f) normal.normalize();
+            vertex.position = new Float3(position.x, position.y, position.z);
+            vertex.normals = new Float3(normal.x, normal.y, normal.z);
         }
     }
 
@@ -368,43 +397,8 @@ public class AssimpFBXParser {
         return keys;
     }
 
-    private static Map<String, SkinnedModel.Animation> generatedAnimations(List<SkinnedModel.Bone> bones) {
-        Map<Integer, SkinnedModel.BoneTrack> idle = new HashMap<>();
-        Map<Integer, SkinnedModel.BoneTrack> walk = new HashMap<>();
-
-        for (int i = 0; i < bones.size(); i++) {
-            String name = cleanName(bones.get(i).name()).toLowerCase().replace(" ", "");
-            if (name.endsWith("head")) {
-                idle.put(i, new SkinnedModel.BoneTrack(List.of(), List.of(
-                        new SkinnedModel.KeyVec3(0f, new Vector3f(0f, 0f, -6f)),
-                        new SkinnedModel.KeyVec3(1f, new Vector3f(0f, 0f, 6f)),
-                        new SkinnedModel.KeyVec3(2f, new Vector3f(0f, 0f, -6f))
-                ), List.of()));
-            } else if (name.endsWith("rightleg") || name.endsWith("leftleg")) {
-                float sign = name.contains("right") ? -1f : 1f;
-                walk.put(i, new SkinnedModel.BoneTrack(List.of(), List.of(
-                        new SkinnedModel.KeyVec3(0f, new Vector3f(0f, 0f, 18f * sign)),
-                        new SkinnedModel.KeyVec3(0.35f, new Vector3f(0f, 0f, -18f * sign)),
-                        new SkinnedModel.KeyVec3(0.7f, new Vector3f(0f, 0f, 18f * sign))
-                ), List.of()));
-            } else if (name.endsWith("rightarm") || name.endsWith("leftarm")) {
-                float sign = name.contains("right") ? 1f : -1f;
-                walk.put(i, new SkinnedModel.BoneTrack(List.of(), List.of(
-                        new SkinnedModel.KeyVec3(0f, new Vector3f(0f, 0f, 16f * sign)),
-                        new SkinnedModel.KeyVec3(0.35f, new Vector3f(0f, 0f, -16f * sign)),
-                        new SkinnedModel.KeyVec3(0.7f, new Vector3f(0f, 0f, 16f * sign))
-                ), List.of()));
-            }
-        }
-
-        return Map.of(
-                "Idle", SkinnedModel.Animation.logicalRigDriven(2f, idle),
-                "Walk", SkinnedModel.Animation.logicalRigDriven(0.7f, walk)
-        );
-    }
-
     private static Float3 convert(AIVector3D vector) {
-        return new Float3(vector.x(), vector.z(), -vector.y());
+        return new Float3(vector.x(), vector.y(), vector.z());
     }
 
     private static Float3 convertNormal(AIVector3D vector) {
@@ -425,14 +419,27 @@ public class AssimpFBXParser {
                 matrix.a4(), matrix.b4(), matrix.c4(), matrix.d4()
         );
 
-        Matrix4f basis = new Matrix4f(
-                1f, 0f, 0f, 0f,
-                0f, 0f, -1f, 0f,
-                0f, 1f, 0f, 0f,
-                0f, 0f, 0f, 1f
-        );
+        return result;
+    }
 
-        return new Matrix4f(basis).mul(result).mul(new Matrix4f(basis).invert());
+    private static Matrix4f sceneToModel(AIScene scene) {
+        AIMetaData metadata = scene.mMetaData();
+        // UpAxis describes file-world space, after all authored node transforms are composed.
+        return FbxCoordinateSpace.fromUpAxis(metadataInt(metadata, "UpAxis", 1), metadataInt(metadata, "UpAxisSign", 1));
+    }
+
+    private static int metadataInt(AIMetaData metadata, String key, int fallback) {
+        if (metadata == null) return fallback;
+        AIString.Buffer keys = metadata.mKeys();
+        AIMetaDataEntry.Buffer values = metadata.mValues();
+        if (keys == null || values == null) return fallback;
+        for (int i = 0; i < metadata.mNumProperties(); i++) {
+            AIMetaDataEntry entry = values.get(i);
+            if (key.equals(keys.get(i).dataString()) && entry.mType() == Assimp.AI_INT32) {
+                return entry.mData(Integer.BYTES).order(ByteOrder.nativeOrder()).getInt(0);
+            }
+        }
+        return fallback;
     }
 
     private static String cleanName(String name) {
@@ -443,10 +450,6 @@ public class AssimpFBXParser {
         int modelPrefix = name.indexOf("Model::");
         if (modelPrefix >= 0) {
             name = name.substring(modelPrefix + "Model::".length());
-        }
-        int namespace = name.lastIndexOf(':');
-        if (namespace >= 0 && namespace + 1 < name.length()) {
-            name = name.substring(namespace + 1);
         }
         return name;
     }
@@ -460,8 +463,6 @@ public class AssimpFBXParser {
                 vertex.color
         );
     }
-
-    private record BoneBuild(String name, Matrix4f offsetMatrix) {}
 
     private record MeshAppearance(Identifier texture, int color) {}
 
@@ -478,22 +479,17 @@ public class AssimpFBXParser {
         }
 
         int[] boneIds() {
-            int count = Math.min(4, boneIds.size());
+            int count = boneIds.size();
             int[] result = new int[count];
             for (int i = 0; i < count; i++) result[i] = boneIds.get(i);
             return result;
         }
 
         float[] weights() {
-            int count = Math.min(4, weights.size());
+            int count = weights.size();
             float[] result = new float[count];
-            float total = 0f;
             for (int i = 0; i < count; i++) {
                 result[i] = weights.get(i);
-                total += result[i];
-            }
-            if (total > 0f) {
-                for (int i = 0; i < count; i++) result[i] /= total;
             }
             return result;
         }
