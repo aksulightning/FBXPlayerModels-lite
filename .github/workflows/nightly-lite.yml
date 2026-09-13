@@ -117,7 +117,7 @@ jobs:
           project: ${{ vars.MODRINTH_ID }}
           channel: "alpha"
           changelog: "Automatic nightly build from [GitHub repo](https://github.com/aksulightning/FBXPlayerModels-lite)."
-          version: ${{ matrix.branch }}-nightly-${{ steps.date_step.outputs.date }}
+          version: nightly-${{ matrix.minecraft_version }}-${{ steps.date_step.outputs.date }}
           loaders: ${{ matrix.mod_launcher }}
           game-versions: ${{ matrix.minecraft_version }}
           files: ${{ matrix.artifact_path }}/fbx-player-models-lite-nightly-${{ matrix.minecraft_version }}-${{ steps.date_step.outputs.date }}.jar

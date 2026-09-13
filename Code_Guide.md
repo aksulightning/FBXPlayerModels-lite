@@ -96,6 +96,16 @@ Jobs use concurrency groups scoped to the workflow and nightly tag with `cancel-
 
 Publication-recovery validation on 2026-09-13: the prescribed four compile tasks passed using Java 25 with existing compilation outputs up to date. The publisher's command/error paths were reviewed against the official GitHub CLI documentation. The compile command does not exercise the Bash publisher or simulate GitHub failures; no additional checks, live tag pushes, release changes, or workflow dispatches were run.
 
+### Modrinth nightly version numbers
+
+`.github/workflows/nightly-lite.yml` publishes each matrix target as an alpha release through `cloudnode-pro/modrinth-publish@v2`, using `secrets.MODRINTH_TOKEN`, `vars.MODRINTH_ID`, and the dated copy of the target's production jar.
+
+Fixed Modrinth's reported `version_number` length rejection on 2026-09-13. The previous `<branch>-nightly-<date>` value expanded to 33 characters with branch `clientside` and the UTC `%y-%m-%d-%H-%M` timestamp. Modrinth's [version creation validator](https://github.com/modrinth/code/blob/main/apps/labrinth/src/routes/v2/version_creation.rs#L33) permits 1–32 characters.
+
+Publication now uses `nightly-<minecraft_version>-<date>`, for example `nightly-1.21.1-26-09-13-16-30`. The current 1.21.1 and Beta values are 29 characters; the 26.2 value is 27. This format identifies the Minecraft target while keeping the timestamp. The alpha channel, changelog, loader/game-version metadata, artifact filename, and GitHub release publication are unchanged.
+
+Validation: the four Fabric compile tasks prescribed by `AGENTS.md` passed using Java 25 with existing compilation outputs up to date. These tasks do not execute the publish action; no live Modrinth release or workflow rerun was performed.
+
 ## Project layout
 
 ```text
